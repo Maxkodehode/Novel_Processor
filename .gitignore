@@ -1,0 +1,23 @@
+# IDE (Rider/JetBrains)
+.idea/
+*.iml
+*.xml
+/shelf/
+/queries/
+/dataSources/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Scraper & Tooling
+scraper/
+temp_ng.zip
+*.zip
+
+# Data & Output
+*.db
+*.db-journal
+Novel_EPUB_Destination/*.epub
+!Novel_EPUB_Destination/.gitkeep
