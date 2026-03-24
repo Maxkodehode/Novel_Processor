@@ -7,7 +7,7 @@ BeautifulSoup
 ###DB:
 Novel: - ID - Title - Author - Source_url - Synopsis - cover_path - Slug<Unique> - language
 
-Chapter: NovelID - Chapter_title - hash - last updated - Chapter_Order - content - htmlcontent - novel_id
+Chapter: ID - NovelID - Chapter_title - hash - last updated - Chapter_Order - content - htmlcontent
 
 Tags: - ID - name<unique> - 
 
