@@ -12,7 +12,11 @@ def create_pure_schema():
                                                          id INTEGER PRIMARY KEY AUTOINCREMENT,
                                                          title TEXT NOT NULL UNIQUE,
                                                          synopsis TEXT,
-                                                         source_url TEXT
+                                                         author TEXT,
+                                                         source_url TEXT,
+                                                         cover_path TEXT,
+                                                         slug TEXT NOT NULL UNIQUE,
+                                                         language NOT NULL TEXT
                    )
                    """)
 
