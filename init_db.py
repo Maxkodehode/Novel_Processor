@@ -28,6 +28,7 @@ def create_pure_schema():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         novel_id INTEGER,
         chapter_title TEXT,
+        chapter_url TEXT UNIQUE,
         chapter_hash TEXT NOT NULL,
         plain_content TEXT,
         html_content TEXT,

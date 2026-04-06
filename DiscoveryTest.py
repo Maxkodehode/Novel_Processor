@@ -351,14 +351,84 @@ class ScribbleHubAdapter(BaseAdapter):
         _extract_chapters(soup)
 
         if self._pw_page and last_page > 1:
-            # Base URL without existing ?toc= param
-            base_url = url.split("?")[0].rstrip("/") + "/"
+            pw = self._pw_page
+
+            # ── Step 1: Set display to 50 chapters/page via the dropdown ──────
+            # This triggers toc_chapter() JS in-page — no navigation, no CF check.
+            # With 50/page and 134 chapters we need 3 pages instead of 9.
+            try:
+                pw.select_option("select#show_chapters", value="50")
+                # Wait for the TOC list to repopulate with more items
+                pw.wait_for_function(
+                    "document.querySelectorAll('li.toc_w').length > 15", timeout=10_000
+                )
+                # Re-read page 1 with 50 chapters and recalculate pagination
+                page1_soup = BeautifulSoup(pw.content(), "html.parser")
+                chapters_by_order.clear()
+                _extract_chapters(page1_soup)
+
+                # Recalculate last_page after the count change
+                new_last = 1
+                for a in page1_soup.select("ul#pagination-mesh-toc a.page-link"):
+                    txt = a.get_text(strip=True)
+                    if txt.isdigit():
+                        new_last = max(new_last, int(txt))
+                last_page = new_last
+                print(f"    [SH] Display set to 50/page — {last_page} pages to fetch")
+            except Exception as e:
+                print(f"    [SH] Could not set display count: {e}")
+
+            # ── Step 2: Click pagination links in-page (stays in JS session) ──
+            # page.goto() triggers a full reload → Cloudflare challenge.
+            # Clicking the <a> elements fires wi_getreleases_pagination() via JS
+            # which swaps TOC content in-place without a navigation event.
             for page_num in range(2, last_page + 1):
-                toc_url = f"{base_url}?toc={page_num}#content1"
                 print(f"    [SH] TOC page {page_num}/{last_page} …")
-                self._pw_page.goto(toc_url, wait_until="networkidle", timeout=30_000)
-                page_soup = BeautifulSoup(self._pw_page.content(), "html.parser")
-                _extract_chapters(page_soup)
+                try:
+                    # Find and click the page number link in the pagination bar
+                    clicked = pw.evaluate(f"""
+                        (() => {{
+                            const links = document.querySelectorAll('ul#pagination-mesh-toc a.page-link');
+                            for (const a of links) {{
+                                if (a.textContent.trim() === '{page_num}') {{
+                                    a.click();
+                                    return true;
+                                }}
+                            }}
+                            // If not visible (ellipsis hid it), find the next » arrow
+                            const next = document.querySelector('ul#pagination-mesh-toc a.page-link.next');
+                            if (next) {{ next.click(); return 'next'; }}
+                            return false;
+                        }})()
+                    """)
+                    if not clicked:
+                        print(
+                            f"    [SH] Page {page_num} link not found in pagination bar, stopping"
+                        )
+                        break
+
+                    # Wait for TOC list to update — watch for the active page indicator
+                    pw.wait_for_function(
+                        f"""
+                        (() => {{
+                            const active = document.querySelector(
+                                'ul#pagination-mesh-toc li.active a, '
+                                'ul#pagination-mesh-toc li.active span'
+                            );
+                            return active && active.textContent.trim() === '{page_num}';
+                        }})()
+                        """,
+                        timeout=15_000,
+                    )
+                    # Small settle wait for the list items to finish rendering
+                    pw.wait_for_timeout(500)
+                    page_soup = BeautifulSoup(pw.content(), "html.parser")
+                    _extract_chapters(page_soup)
+
+                except Exception as e:
+                    print(f"    [SH] Warning: page {page_num} failed ({e}), skipping")
+                    continue
+
         elif last_page > 1:
             print(
                 f"[!] Warning: {chapter_count} chapters across {last_page} pages, "
@@ -628,7 +698,14 @@ def scrape(
         ctx = browser.new_context(user_agent=USER_AGENT)
         page = ctx.new_page()
         print(f"[*] Fetching {url} …")
-        page.goto(url, wait_until="networkidle", timeout=60_000)
+        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        # Wait for any key content element — avoids scraping a half-loaded page
+        try:
+            page.wait_for_selector(
+                "li.toc_w, div.fiction-stats, div#profile_top", timeout=15_000
+            )
+        except Exception:
+            pass  # proceed anyway; adapter will handle missing elements gracefully
 
         # Dismiss cookie banners
         for label in ("Accept", "Accept All", "I Agree", "OK"):
