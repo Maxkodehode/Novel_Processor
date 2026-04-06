@@ -1,5 +1,6 @@
 import sqlite3
 
+
 def create_pure_schema():
     # This connects to the file; if it doesn't exist, it creates it
     conn = sqlite3.connect("novels.db")
@@ -10,6 +11,7 @@ def create_pure_schema():
     CREATE TABLE IF NOT EXISTS novels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL UNIQUE,
+        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
         synopsis TEXT,
         author TEXT,
         source_url TEXT,
@@ -58,6 +60,7 @@ def create_pure_schema():
     conn.commit()
     conn.close()
     print("✅ Empty Database Schema Created Successfully!")
+
 
 if __name__ == "__main__":
     create_pure_schema()
