@@ -28,6 +28,6 @@ def worker():
             # cursor.execute("UPDATE chapters SET plain_content = ?, chapter_hash = ? WHERE id = ?",
             #                (text_content, ch_hash, ch_id))
             # conn.commit()
-            time.sleep(2)  # Be kind to the server
+            time.sleep(8)  # Be kind to the server
 
     conn.close()

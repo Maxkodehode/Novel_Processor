@@ -7,10 +7,10 @@ def populate_from_json(json_path="output.json", db_path="novels.db"):
         data = json.load(f)
 
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")  # enforce FK constraints
+    conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
 
-    # ── 1. Insert novel ──────────────────────────────────────────────────────
+    # Insert novel
     cursor.execute(
         """
         INSERT INTO novels (title, author, synopsis, source_url, slug, language)
@@ -32,16 +32,15 @@ def populate_from_json(json_path="output.json", db_path="novels.db"):
         ),
     )
 
-    # BUG 1 FIX: fetchone() returns a tuple like (1,) — always unpack with [0]
     cursor.execute("SELECT id FROM novels WHERE title = ?", (data["title"],))
     row = cursor.fetchone()
     if not row:
         print("Error: Novel not found after insert.")
         conn.close()
         return
-    novel_id = row[0]  # integer, not tuple
+    novel_id = row[0]
 
-    # ── 2. Insert chapter placeholders ───────────────────────────────────────
+    # Insert chapter placeholders
     chapters_inserted = 0
     for ch in data["chapters"]:
         cursor.execute(
@@ -57,23 +56,19 @@ def populate_from_json(json_path="output.json", db_path="novels.db"):
         if cursor.rowcount:
             chapters_inserted += 1
 
-    # ── 3. Insert tags and link them to this novel ───────────────────────────
-    # BUG 2 FIX: the SELECT and INSERT for novel_tags must be INSIDE the loop
-    # BUG 3 FIX: unpack tag_id with [0] — same tuple issue as novel_id
+    # Insert tags and link them to this novel
     tags_linked = 0
     for tag_name in data.get("tags", []):
-        # Upsert the tag
         cursor.execute(
             "INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING",
             (tag_name,),
         )
 
-        # Fetch its id — must be inside the loop, one fetch per tag
         cursor.execute("SELECT id FROM tags WHERE name = ?", (tag_name,))
         tag_row = cursor.fetchone()
         if not tag_row:
             continue
-        tag_id = tag_row[0]  # integer, not tuple
+        tag_id = tag_row[0]
 
         # Link tag to this novel
         cursor.execute(
@@ -82,7 +77,7 @@ def populate_from_json(json_path="output.json", db_path="novels.db"):
             VALUES (?, ?)
                 ON CONFLICT(novel_id, tag_id) DO NOTHING
             """,
-            (novel_id, tag_id),  # both plain integers now
+            (novel_id, tag_id),
         )
         tags_linked += 1
 
