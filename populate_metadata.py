@@ -83,7 +83,7 @@ def populate_from_json(json_path="output.json", db_path="novels.db"):
 
     conn.commit()
     conn.close()
-    print(f"✅ '{data['title']}' — novel_id={novel_id}")
+    print(f"'{data['title']}' — novel_id={novel_id}")
     print(f"   Chapters : {chapters_inserted} inserted / {len(data['chapters'])} total")
     print(f"   Tags     : {tags_linked} linked")
 

@@ -2,7 +2,6 @@ import sqlite3
 
 
 def create_pure_schema():
-    # This connects to the file; if it doesn't exist, it creates it
     conn = sqlite3.connect("novels.db")
     cursor = conn.cursor()
 
@@ -22,7 +21,6 @@ def create_pure_schema():
     """)
 
     # 2. The Chapters Table
-    # Added missing commas after chapter_hash, plain_content, and chapter_order
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS chapters (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +45,7 @@ def create_pure_schema():
     )
     """)
 
-    # 4. The Link Table (Junction Table)
+    # 4. The Link Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS novel_tags (
         novel_id INTEGER,
@@ -60,7 +58,7 @@ def create_pure_schema():
 
     conn.commit()
     conn.close()
-    print("✅ Empty Database Schema Created Successfully!")
+    print("Empty Database Schema Created Successfully!")
 
 
 if __name__ == "__main__":
