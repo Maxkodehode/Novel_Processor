@@ -2,7 +2,12 @@ EbookLib https://docs.sourcefabric.org/projects/ebooklib/en/latest/tutorial.html
 epub-gen
 BeautifulSoup
 
-
+pip freeze > requirements.txt
+###Setup:
+sudo apt update && sudo apt install build-essential python3-dev
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
 ###DB:
 Novel: - ID - Title - Author - Source_url - Synopsis - cover_path - Slug<Unique> - language
