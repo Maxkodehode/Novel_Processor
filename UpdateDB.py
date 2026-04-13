@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta
+
+import argparse
+
 from Processing_Epub import get_db_connection
+from scraper_engine import scrape, _parse_and_handle_cover
 
 
 def check_all_novels():
@@ -7,8 +11,31 @@ def check_all_novels():
     cursor = conn.cursor()
 
     # 1. Fetch all novels from the database
-    cursor.execute("SELECT id, title, source_url, last_updated FROM novels")
-    all_novels = cursor.fetchall()
+    cursor.execute("SELECT id, source_url FROM novels WHERE cover_path IS NULL")
+    source = cursor.fetchall()
+
+    _parse_and_handle_cover(source, id)
+
+    parser = argparse.ArgumentParser(description="Novel scraper pipeline")
+    parser.add_argument("--url", required=True, help="Novel landing page URL")
+
+    args = parser.parse_args()
+    save_html = "page.html" if args.debug else None
+    data = scrape(
+        url=args.url,
+        use_local=args.use_local,
+        save_html=save_html,
+    )
+    cover_url = data.get("cover_url")
+    if cover_url:
+        from scraper_engine import download_cover, save_cover_to_db
+
+        slug = data.get("slug") or f"novel_{novel_id}"
+        cover_path = download_cover(cover_url, novel_id, slug)
+        if cover_path:
+            save_cover_to_db(novel_id, cover_path)
+    else:
+        logger.warning("No cover URL found for this novel.")
 
     for novel in all_novels:
         # Unpack the data from the row

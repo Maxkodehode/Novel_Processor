@@ -15,6 +15,7 @@ def create_pure_schema():
         author TEXT,
         source_url TEXT,
         cover_path TEXT,
+        cover_url TEXT,
         slug TEXT NOT NULL UNIQUE,
         language TEXT NOT NULL
     )

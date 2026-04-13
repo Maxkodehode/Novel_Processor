@@ -11,7 +11,10 @@ class BaseAdapter(ABC):
         return any(h in host for h in cls.HOSTS)
 
     @abstractmethod
-    def parse(self, soup, url: str) -> dict: ...
+    def parse_chapter_content(self, soup) -> dict:
+        """For chapter text."""
+
+    ...
 
     @staticmethod
     def _text(tag) -> str | None:

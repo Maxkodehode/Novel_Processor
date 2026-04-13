@@ -4,15 +4,11 @@ import json
 from bs4 import BeautifulSoup
 
 from .base import BaseAdapter
+from utils import slugify
 
 
 class RoyalRoadAdapter(BaseAdapter):
     HOSTS = ["royalroad.com"]
-
-    def parse(self, soup, url: str) -> dict:
-
-        class RoyalRoadAdapter(BaseAdapter):
-            HOSTS = ["royalroad.com"]
 
     def parse(self, soup: BeautifulSoup, url: str) -> dict:
         # --- Title & author ---
@@ -29,7 +25,7 @@ class RoyalRoadAdapter(BaseAdapter):
         # --- Tags ---
         tags = [self._text(a) for a in soup.select("a.fiction-tag")]
 
-        # --- Status (from label spans) ---
+        # --- Status ---
         status = None
         for span in soup.select("span.label.label-default"):
             t = self._text(span).upper()
@@ -61,15 +57,12 @@ class RoyalRoadAdapter(BaseAdapter):
             scores["overall_meta"] = float(meta["content"])
 
         # --- Stats ---
-        # The stats div has two columns: left=scores (star widgets), right=view counts.
-        # We target only the right column to avoid star-widget label/value noise.
         stats = {}
         stats_div = soup.select_one("div.fiction-stats")
         if stats_div:
             cols = stats_div.select("div.col-sm-6")
             stat_col = cols[1] if len(cols) > 1 else stats_div
             lis = stat_col.select("li.bold.uppercase")
-            # Pairs: label-li then value-li (alternating)
             for i in range(0, len(lis) - 1, 2):
                 label = lis[i].get_text(strip=True).rstrip(" :")
                 value = lis[i + 1].get_text(strip=True)
@@ -77,14 +70,13 @@ class RoyalRoadAdapter(BaseAdapter):
                     key = label.lower().replace(" ", "_")
                     stats[key] = value
 
-            # word count from tooltip
             icon = stats_div.select_one("i.popovers[data-content]")
             if icon:
                 m = re.search(r"from\s+([\d,]+)\s+words", icon.get("data-content", ""))
                 if m:
                     stats["word_count"] = m.group(1)
 
-        # --- Chapter count label ---
+        # --- Chapter count ---
         count_span = soup.select_one("span.label.label-default.pull-right")
         chapter_count = None
         if count_span:
@@ -92,8 +84,7 @@ class RoyalRoadAdapter(BaseAdapter):
             if m:
                 chapter_count = int(m.group(1))
 
-        # --- Full chapter list from embedded JSON (window.chapters = [...]) ---
-        # RR injects ALL chapters into a <script> block - no pagination needed.
+        # --- Chapter list from embedded JSON ---
         chapters = []
         for script in soup.find_all("script"):
             text = script.string or ""
@@ -115,7 +106,7 @@ class RoyalRoadAdapter(BaseAdapter):
                     pass
                 break
 
-        # Fallback: parse the visible table rows if the script block wasn't found
+        # Fallback: visible table rows
         if not chapters:
             for i, row in enumerate(soup.select("tr.chapter-row")):
                 link = row.select_one("td a[href]")
@@ -135,6 +126,7 @@ class RoyalRoadAdapter(BaseAdapter):
             "site": "royalroad",
             "url": url,
             "title": title,
+            "slug": slugify(title) if title else None,
             "author": author,
             "cover_url": cover_url,
             "status": status,
@@ -145,4 +137,13 @@ class RoyalRoadAdapter(BaseAdapter):
             "stats": stats,
             "chapter_count": chapter_count or len(chapters),
             "chapters": chapters,
+        }
+
+    def parse_chapter_content(self, soup: BeautifulSoup) -> dict:
+        content_tag = soup.select_one(".chapter-inner")
+        return {
+            "plain_text": content_tag.get_text(separator="\n", strip=True)
+            if content_tag
+            else "",
+            "raw_html": str(content_tag) if content_tag else "",
         }
