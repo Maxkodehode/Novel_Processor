@@ -55,9 +55,20 @@ class FanFictionAdapter(BaseAdapter):
         author = self._text(author_tag)
 
         cover = soup.select_one("img.cimage")
-        cover_url = cover["src"] if cover else None
-        if cover_url and not cover_url.startswith("http"):
-            cover_url = "https:" + cover_url
+        cover_url = None
+        if cover:
+            src = cover.get("src", "")
+            if src.startswith("http"):
+                cover_url = src
+            elif src.startswith("//"):
+                cover_url = "https:" + src
+            elif src.startswith("/"):
+                # Relative path — prepend FF.net domain
+                cover_url = "https://www.fanfiction.net" + src
+            # Upgrade thumbnail size (/75/) to full resolution (/180/)
+            # Only do this for FF.net's /image/<id>/<size>/ pattern
+            if cover_url and re.search(r"/image/\d+/\d+/$", cover_url):
+                cover_url = re.sub(r"/\d+/$", "/180/", cover_url)
 
         syn = profile.select_one("div.xcontrast_txt") if profile else None
         synopsis = self._text(syn)

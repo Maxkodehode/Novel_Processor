@@ -21,3 +21,4 @@ temp_ng.zip
 *.db-journal
 Novel_EPUB_Destination/*.epub
 !Novel_EPUB_Destination/.gitkeep
+covers/

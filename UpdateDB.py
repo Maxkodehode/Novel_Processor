@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import argparse
 
 from Processing_Epub import get_db_connection
-from scraper_engine import scrape, _parse_and_handle_cover
+from scraper_engine import scrape
 
 
 def check_all_novels():
@@ -11,10 +11,8 @@ def check_all_novels():
     cursor = conn.cursor()
 
     # 1. Fetch all novels from the database
-    cursor.execute("SELECT id, source_url FROM novels WHERE cover_path IS NULL")
+    cursor.execute("SELECT id, source_url FROM novels WHERE cover_url IS NULL")
     source = cursor.fetchall()
-
-    _parse_and_handle_cover(source, id)
 
     parser = argparse.ArgumentParser(description="Novel scraper pipeline")
     parser.add_argument("--url", required=True, help="Novel landing page URL")

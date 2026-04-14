@@ -34,15 +34,16 @@ def populate(data: dict, db_path: str = "novels.db") -> int | None:
     try:
         cursor.execute(
             """
-            INSERT INTO novels (title, author, synopsis, source_url, slug, language)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO novels (title, author, synopsis, source_url, slug, language, cover_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(title) DO UPDATE SET
-                author       = excluded.author,
+                                          author       = excluded.author,
                                           synopsis     = excluded.synopsis,
                                           source_url   = excluded.source_url,
                                           slug         = excluded.slug,
                                           language     = excluded.language,
-                                          last_updated = CURRENT_TIMESTAMP
+                                          last_updated = CURRENT_TIMESTAMP,
+                                          cover_url    = excluded.cover_url
             """,
             (
                 data["title"],
@@ -51,6 +52,7 @@ def populate(data: dict, db_path: str = "novels.db") -> int | None:
                 data.get("url"),
                 slug,
                 data.get("language", "en"),
+                data.get("cover_url"),
             ),
         )
 
