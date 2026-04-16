@@ -31,7 +31,7 @@ Novel_EPUB_Destination/*.epub
 covers/
 output.json
 *.html
-!static/index.html
+!reader/static/index.html
 
 # Re-enforce XML ignore for non-IDE files if needed
 # Note: Since !.idea/sqldialects.xml is specific, it will override this
