@@ -1,7 +1,14 @@
 # IDE (Rider/JetBrains)
-.idea/
+# Use the asterisk pattern to allow whitelisting inside the folder
+.idea/**/*
+!.idea/sqldialects.xml
+!.idea/dataSources.xml
+!.idea/misc.xml
+
+# Ensure sensitive or high-churn IDE clutter stays out
+.idea/workspace.xml
+.idea/dataSources.local.xml
 *.iml
-*.xml
 /shelf/
 /queries/
 /dataSources/
@@ -24,3 +31,7 @@ Novel_EPUB_Destination/*.epub
 covers/
 output.json
 *.html
+
+# Re-enforce XML ignore for non-IDE files if needed
+# Note: Since !.idea/sqldialects.xml is specific, it will override this
+*.xml

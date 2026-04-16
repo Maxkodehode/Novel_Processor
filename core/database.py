@@ -142,3 +142,16 @@ class NovelRepository:
         self.db.execute(
             query, (content_text, raw_html, chapter_hash, ch_id), commit=True
         )
+
+    def get_active_novels(self):
+        query = "SELECT id, title, source_url, last_updated FROM novels WHERE status = 'ACTIVE'"
+        return self.db.execute(query)
+
+    def get_novel_chapters(self, novel_id: int):
+        query = "SELECT chapter_order, chapter_url, id FROM chapters WHERE novel_id = ? ORDER BY chapter_order"
+        rows = self.db.execute(query, (novel_id,))
+        return {row[0]: {"url": row[1], "id": row[2]} for row in rows}
+
+    def update_novel_timestamp(self, novel_id: int):
+        query = "UPDATE novels SET last_updated = CURRENT_TIMESTAMP WHERE id = ?"
+        self.db.execute(query, (novel_id,), commit=True)

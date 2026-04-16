@@ -20,7 +20,8 @@ def create_pure_schema():
         cover_path TEXT,
         cover_url TEXT,
         slug TEXT NOT NULL UNIQUE,
-        language TEXT NOT NULL
+        language TEXT NOT NULL,
+        status TEXT DEFAULT 'ACTIVE'
     )
     """)
 
@@ -40,6 +41,11 @@ def create_pure_schema():
         FOREIGN KEY (novel_id) REFERENCES novels (id)
     )
     """)
+
+    # Indexing for performance
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_novel_order ON chapters (novel_id, chapter_order)"
+    )
 
     # 3. The Tags Table
     cursor.execute("""
