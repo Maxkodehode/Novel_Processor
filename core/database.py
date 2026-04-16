@@ -155,3 +155,75 @@ class NovelRepository:
     def update_novel_timestamp(self, novel_id: int):
         query = "UPDATE novels SET last_updated = CURRENT_TIMESTAMP WHERE id = ?"
         self.db.execute(query, (novel_id,), commit=True)
+
+    def get_tags(self):
+        query = "SELECT name FROM tags ORDER BY name ASC"
+        rows = self.db.execute(query)
+        return [row[0] for row in rows]
+
+    def get_filtered_novels(
+        self, include_tags=None, exclude_tags=None, sort_by="title"
+    ):
+        """
+        Retrieves novels with tri-state tag filtering and sorting.
+        sort_by options: 'title', 'last_updated', 'chapter_count', 'word_count'
+        """
+        params = []
+
+        # Base query with chapter_count and chapters_read
+        # We also need a way to get word_count. Word count is stored in chapters or novels?
+        # Looking at schema: chapters has plain_content. Word count is len(content.split()).
+        # The issue description says sort by Word Count (Descending).
+        # Usually word count is per novel (sum of chapters).
+
+        query = """
+            SELECT n.*, 
+                   (SELECT COUNT(*) FROM chapters WHERE novel_id = n.id) as chapter_count,
+                   (SELECT COUNT(*) FROM reading_progress WHERE novel_id = n.id AND scroll_position >= 0.9) as chapters_read,
+                   (SELECT SUM(length(plain_content) - length(replace(plain_content, ' ', '')) + 1) 
+                    FROM chapters WHERE novel_id = n.id AND plain_content IS NOT NULL) as word_count
+            FROM novels n
+            WHERE 1=1
+        """
+
+        if include_tags:
+            for tag in include_tags:
+                query += """
+                    AND EXISTS (
+                        SELECT 1 FROM novel_tags nt 
+                        JOIN tags t ON nt.tag_id = t.id 
+                        WHERE nt.novel_id = n.id AND t.name = ?
+                    )
+                """
+                params.append(tag)
+
+        if exclude_tags:
+            for tag in exclude_tags:
+                query += """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM novel_tags nt 
+                        JOIN tags t ON nt.tag_id = t.id 
+                        WHERE nt.novel_id = n.id AND t.name = ?
+                    )
+                """
+                params.append(tag)
+
+        # Sorting
+        sort_map = {
+            "title": "n.title ASC",
+            "last_updated": "n.last_updated DESC",
+            "chapter_count": "chapter_count DESC",
+            "word_count": "word_count DESC",
+        }
+        order_by = sort_map.get(sort_by, "n.title ASC")
+        query += f" ORDER BY {order_by}"
+
+        rows = self.db.execute(query, tuple(params))
+
+        # Convert to list of dicts for easier consumption in API
+        # Since DatabaseManager.execute returns list of tuples, we need column names.
+        # But DatabaseManager doesn't return column names.
+        # We can either change DatabaseManager or use a different approach.
+        # Actually reader/server.py uses sqlite3.Row.
+
+        return rows

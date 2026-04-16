@@ -9,6 +9,7 @@
     --line-height: 1.6;
     --paragraph-spacing: 1.0em;
     --reading-width: 70ch;
+    --content-width: 70ch;
 }
 
 [data-theme="light"] {
@@ -252,7 +253,7 @@ header {
 }
 
 #reading-column {
-    max-width: var(--reading-width);
+    max-width: var(--content-width);
     margin: 70px auto 100px;
     padding: 0 20px;
 }
@@ -270,10 +271,29 @@ header {
     bottom: 0;
     width: 350px;
     background: var(--bg-secondary);
-    z-index: 200;
+    z-index: 500;
     box-shadow: 0 0 15px rgba(0,0,0,0.2);
     padding: 25px;
     transition: transform 0.3s;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.panel-header h3 {
+    margin: 0;
+}
+
+.close-btn {
+    background: transparent;
+    border: none;
+    font-size: 1.5rem;
+    color: var(--text-secondary);
+    cursor: pointer;
 }
 
 .side-panel.right {
@@ -384,6 +404,58 @@ button:hover {
     color: white;
     border: none;
     font-weight: bold;
+}
+
+/* Tri-state Tag Filter */
+.tag-filter-section {
+    max-width: 1200px;
+    margin: 0 auto 20px;
+}
+
+.tag-filter-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.filter-tag {
+    background: var(--bg-secondary);
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    user-select: none;
+    border: 1px solid rgba(0,0,0,0.1);
+    transition: all 0.2s;
+}
+
+.filter-tag.include {
+    background: #28a745;
+    color: white;
+    border-color: #218838;
+}
+
+.filter-tag.include::before { content: "+ "; }
+
+.filter-tag.exclude {
+    background: #dc3545;
+    color: white;
+    border-color: #c82333;
+}
+
+.filter-tag.exclude::before { content: "- "; }
+
+#sort-select {
+    padding: 8px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid rgba(0,0,0,0.1);
+}
+
+.novel-actions {
+    margin-top: 20px;
 }
 
 .primary-btn:hover {

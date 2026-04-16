@@ -65,6 +65,9 @@ def create_pure_schema():
         FOREIGN KEY (tag_id) REFERENCES tags (id)
     )
     """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_novel_tags_composite ON novel_tags (novel_id, tag_id)"
+    )
 
     conn.commit()
     conn.close()

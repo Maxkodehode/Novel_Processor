@@ -23,7 +23,12 @@ let currentState = {
     view: VIEWS.LIBRARY,
     novel: null,
     chapter: null,
-    settings: { ...DEFAULT_SETTINGS }
+    settings: { ...DEFAULT_SETTINGS },
+    filter: {
+        includeTags: [],
+        excludeTags: [],
+        sortBy: 'title'
+    }
 };
 
 // --- API Module ---
@@ -33,7 +38,14 @@ const api = {
         if (!resp.ok) throw new Error(`API Error: ${resp.status}`);
         return resp.json();
     },
-    getNovels: () => api.fetch('/api/novels'),
+    getNovels: (params = {}) => {
+        const query = new URLSearchParams();
+        if (params.include_tags) params.include_tags.forEach(t => query.append('include_tags', t));
+        if (params.exclude_tags) params.exclude_tags.forEach(t => query.append('exclude_tags', t));
+        if (params.sort_by) query.append('sort_by', params.sort_by);
+        return api.fetch(`/api/novels?${query.toString()}`);
+    },
+    getTags: () => api.fetch('/api/tags'),
     getNovel: (id) => api.fetch(`/api/novels/${id}`),
     getChapter: (id) => api.fetch(`/api/chapters/${id}`),
     search: (q) => api.fetch(`/api/search?q=${encodeURIComponent(q)}`),
@@ -105,18 +117,19 @@ function applySettings() {
     root.style.setProperty('--font-size', `${s.fontSize}px`);
     root.style.setProperty('--line-height', s.lineHeight);
     root.style.setProperty('--paragraph-spacing', `${s.paragraphSpacing}em`);
-    root.style.setProperty('--reading-width', s.columnWidth);
+    root.style.setProperty('--content-width', s.columnWidth);
     
     // Update UI controls
     $('font-size-label').textContent = `${s.fontSize}px`;
     $('line-height-label').textContent = s.lineHeight;
     $('para-spacing-label').textContent = `${s.paragraphSpacing}em`;
+    $('column-width-label').textContent = s.columnWidth;
     
     $('font-size-range').value = s.fontSize;
     $('line-height-range').value = s.lineHeight;
     $('para-spacing-range').value = s.paragraphSpacing;
     $('font-family-select').value = s.fontFamily;
-    $('column-width-select').value = s.columnWidth;
+    $('column-width-range').value = parseInt(s.columnWidth);
     $('bg-color-picker').value = getComputedStyle(root).getPropertyValue('--bg-primary').trim();
     $('text-color-picker').value = getComputedStyle(root).getPropertyValue('--text-primary').trim();
 }
@@ -139,8 +152,20 @@ async function navigateTo(view, params = {}) {
 }
 
 // --- View Rendering ---
+let allTags = [];
+
 async function renderLibrary() {
-    const novels = await api.getNovels();
+    if (allTags.length === 0) {
+        allTags = await api.getTags();
+        renderTagFilters();
+    }
+
+    const novels = await api.getNovels({
+        include_tags: currentState.filter.includeTags,
+        exclude_tags: currentState.filter.excludeTags,
+        sort_by: currentState.filter.sortBy
+    });
+    
     const grid = $('novel-grid');
     grid.innerHTML = '';
     
@@ -168,6 +193,36 @@ async function renderLibrary() {
     });
 }
 
+function renderTagFilters() {
+    const container = $('tag-filter-container');
+    container.innerHTML = '';
+    
+    allTags.forEach(tag => {
+        const el = document.createElement('span');
+        el.className = 'filter-tag';
+        if (currentState.filter.includeTags.includes(tag)) el.classList.add('include');
+        if (currentState.filter.excludeTags.includes(tag)) el.classList.add('exclude');
+        
+        el.textContent = tag;
+        el.onclick = () => {
+            if (el.classList.contains('include')) {
+                el.classList.remove('include');
+                el.classList.add('exclude');
+                currentState.filter.includeTags = currentState.filter.includeTags.filter(t => t !== tag);
+                currentState.filter.excludeTags.push(tag);
+            } else if (el.classList.contains('exclude')) {
+                el.classList.remove('exclude');
+                currentState.filter.excludeTags = currentState.filter.excludeTags.filter(t => t !== tag);
+            } else {
+                el.classList.add('include');
+                currentState.filter.includeTags.push(tag);
+            }
+            renderLibrary();
+        };
+        container.appendChild(el);
+    });
+}
+
 async function renderNovel(id) {
     const novel = await api.getNovel(id);
     currentState.novel = novel;
@@ -182,6 +237,9 @@ async function renderNovel(id) {
         </div>
         <div class="novel-info-text">
             <h2>${novel.title}</h2>
+            <div class="novel-actions" style="margin-bottom: 20px">
+                <button id="continue-reading-btn" class="primary-btn">Continue Reading</button>
+            </div>
             <p><strong>Author:</strong> ${novel.author || 'Unknown'}</p>
             <p><strong>Status:</strong> ${novel.status}</p>
             <div class="tags">${novel.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
@@ -323,6 +381,8 @@ $('settings-btn').onclick = () => {
     hide($('notes-panel'));
 };
 
+$('close-settings-btn').onclick = () => hide($('settings-panel'));
+
 document.querySelectorAll('.theme-presets button').forEach(btn => {
     btn.onclick = () => {
         currentState.settings.theme = btn.dataset.theme;
@@ -356,13 +416,19 @@ $('para-spacing-range').oninput = (e) => {
     currentState.settings.paragraphSpacing = parseFloat(e.target.value);
     saveSettings();
 };
-$('column-width-select').onchange = (e) => {
-    currentState.settings.columnWidth = e.target.value;
+$('column-width-range').oninput = (e) => {
+    currentState.settings.columnWidth = `${e.target.value}ch`;
     saveSettings();
 };
 $('reset-settings-btn').onclick = () => {
     currentState.settings = { ...DEFAULT_SETTINGS };
     saveSettings();
+};
+
+// Sort
+$('sort-select').onchange = (e) => {
+    currentState.filter.sortBy = e.target.value;
+    renderLibrary();
 };
 
 // Bookmarks

@@ -2,7 +2,8 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -55,16 +56,65 @@ class NoteUpdate(BaseModel):
 
 
 @app.get("/api/novels")
-async def get_novels():
+async def get_novels(
+    include_tags: Optional[List[str]] = Query(None),
+    exclude_tags: Optional[List[str]] = Query(None),
+    sort_by: str = "title",
+):
+    params = []
+
+    # Base query with chapter_count, chapters_read, and word_count
     query = """
-    SELECT n.*, 
-           (SELECT COUNT(*) FROM chapters WHERE novel_id = n.id) as chapter_count,
-           (SELECT COUNT(*) FROM reading_progress WHERE novel_id = n.id AND scroll_position >= 0.9) as chapters_read
-    FROM novels n
-    ORDER BY n.title ASC
+        SELECT n.*, 
+               (SELECT COUNT(*) FROM chapters WHERE novel_id = n.id) as chapter_count,
+               (SELECT COUNT(*) FROM reading_progress WHERE novel_id = n.id AND scroll_position >= 0.9) as chapters_read,
+               (SELECT SUM(length(plain_content) - length(replace(plain_content, ' ', '')) + 1) 
+                FROM chapters WHERE novel_id = n.id AND plain_content IS NOT NULL) as word_count
+        FROM novels n
+        WHERE 1=1
     """
-    cursor = app.state.db.execute(query)
+
+    if include_tags:
+        for tag in include_tags:
+            query += """
+                AND EXISTS (
+                    SELECT 1 FROM novel_tags nt 
+                    JOIN tags t ON nt.tag_id = t.id 
+                    WHERE nt.novel_id = n.id AND t.name = ?
+                )
+            """
+            params.append(tag)
+
+    if exclude_tags:
+        for tag in exclude_tags:
+            query += """
+                AND NOT EXISTS (
+                    SELECT 1 FROM novel_tags nt 
+                    JOIN tags t ON nt.tag_id = t.id 
+                    WHERE nt.novel_id = n.id AND t.name = ?
+                )
+            """
+            params.append(tag)
+
+    # Sorting
+    sort_map = {
+        "title": "n.title ASC",
+        "last_updated": "n.last_updated DESC",
+        "chapter_count": "chapter_count DESC",
+        "word_count": "word_count DESC",
+    }
+    order_by = sort_map.get(sort_by, "n.title ASC")
+    query += f" ORDER BY {order_by}"
+
+    cursor = app.state.db.execute(query, tuple(params))
     return [dict(row) for row in cursor.fetchall()]
+
+
+@app.get("/api/tags")
+async def get_tags():
+    query = "SELECT name FROM tags ORDER BY name ASC"
+    cursor = app.state.db.execute(query)
+    return [row["name"] for row in cursor.fetchall()]
 
 
 @app.get("/api/novels/{novel_id}")

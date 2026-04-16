@@ -13,10 +13,24 @@
             <header>
                 <h1>My Library</h1>
                 <div class="header-actions">
-                    <input type="text" id="library-search" placeholder="Filter novels...">
+                    <input type="text" id="library-search" placeholder="Filter current list...">
+                    <select id="sort-select">
+                        <option value="title">Title (A-Z)</option>
+                        <option value="last_updated">Recently Updated</option>
+                        <option value="chapter_count">Chapter Count</option>
+                        <option value="word_count">Word Count</option>
+                    </select>
                     <button id="search-toggle-btn">Search (Ctrl+K)</button>
                 </div>
             </header>
+            
+            <section id="tag-filter-section" class="tag-filter-section">
+                <h4>Filter by Tags:</h4>
+                <div id="tag-filter-container" class="tag-filter-container">
+                    <!-- Populated by JS -->
+                </div>
+            </section>
+
             <div id="novel-grid" class="novel-grid"></div>
         </div>
 
@@ -26,9 +40,6 @@
             </header>
             <div id="novel-details" class="novel-details">
                 <!-- Populated by JS -->
-            </div>
-            <div class="novel-actions">
-                <button id="continue-reading-btn" class="primary-btn">Continue Reading</button>
             </div>
             <div class="chapter-list-container">
                 <h3>Chapters</h3>
@@ -87,7 +98,10 @@
         </div>
 
         <div id="settings-panel" class="side-panel right hidden">
-            <h3>Settings</h3>
+            <div class="panel-header">
+                <h3>Settings</h3>
+                <button id="close-settings-btn" class="close-btn">&times;</button>
+            </div>
             <div class="setting-group">
                 <label>Theme</label>
                 <div class="theme-presets">
@@ -127,13 +141,8 @@
                 <input type="range" id="para-spacing-range" min="0" max="2" step="0.1">
             </div>
             <div class="setting-group">
-                <label>Column Width</label>
-                <select id="column-width-select">
-                    <option value="55ch">Narrow (55ch)</option>
-                    <option value="70ch">Medium (70ch)</option>
-                    <option value="90ch">Wide (90ch)</option>
-                    <option value="100%">Full (100%)</option>
-                </select>
+                <label>Column Width: <span id="column-width-label">70ch</span></label>
+                <input type="range" id="column-width-range" min="40" max="120" step="5">
             </div>
             <button id="reset-settings-btn">Reset to Defaults</button>
         </div>
