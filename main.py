@@ -20,10 +20,9 @@ import json
 import logging
 import sys
 
+from core import DatabaseManager, NovelRepository, NetworkClient
+from services import BrowserService, CoverManager, ScraperService
 from init_db import create_pure_schema
-from scraper_engine import scrape
-from populate_metadata import populate
-from fetch_content import worker as fetch_chapters
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,56 +56,51 @@ def main():
     logger.info("Initialising database schema...")
     create_pure_schema()
 
-    # ── Step 2: Scrape the novel landing page ────────────────────────────────
+    # ── Step 2: Initialize Services ──────────────────────────────────────────
+    db_manager = DatabaseManager()
+    repository = NovelRepository(db_manager)
+    network_client = NetworkClient()
+    browser_service = BrowserService()
+    cover_manager = CoverManager(network_client, repository)
+
+    scraper = ScraperService(network_client, browser_service, repository, cover_manager)
+
+    # ── Step 3: Scrape the novel landing page ────────────────────────────────
     logger.info(f"Scraping: {args.url}")
     save_html = "page.html" if args.debug else None
 
-    data = scrape(
-        url=args.url,
-        use_local=args.use_local,
-        save_html=save_html,
-        # novel_id is not known yet — cover download happens after populate()
-    )
+    with browser_service:
+        data = scraper.scrape_novel(
+            url=args.url, use_local=args.use_local, save_html=save_html
+        )
 
-    if not data or not data.get("title"):
-        logger.error("Scrape returned no usable data. Check the URL or adapter.")
-        sys.exit(1)
+        if not data or not data.get("title"):
+            logger.error("Scrape returned no usable data. Check the URL or adapter.")
+            sys.exit(1)
 
-    logger.info(
-        f"Scraped: '{data['title']}' — {len(data.get('chapters', []))} chapters found"
-    )
+        logger.info(
+            f"Scraped: '{data['title']}' — {len(data.get('chapters', []))} chapters found"
+        )
 
-    if args.debug:
-        with open("output.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info("Debug JSON saved to output.json")
+        if args.debug:
+            with open("output.json", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info("Debug JSON saved to output.json")
 
-    # ── Step 3: Populate DB and get the novel_id ─────────────────────────────
-    logger.info("Inserting metadata into database...")
-    novel_id = populate(data)
+        # ── Step 4: Populate DB ──────────────────────────────────────────────────
+        logger.info("Inserting metadata into database...")
+        novel_id = scraper.populate_novel(data)
 
-    if novel_id is None:
-        logger.error("DB populate failed — aborting.")
-        sys.exit(1)
+        if novel_id is None:
+            logger.error("DB populate failed — aborting.")
+            sys.exit(1)
 
-    # ── Step 4: Download cover now that we have the novel_id ─────────────────
-    cover_url = data.get("cover_url")
-    if cover_url:
-        from scraper_engine import download_cover, save_cover_to_db
-
-        slug = data.get("slug") or f"novel_{novel_id}"
-        cover_path = download_cover(cover_url, novel_id, slug)
-        if cover_path:
-            save_cover_to_db(novel_id, cover_path)
-    else:
-        logger.warning("No cover URL found for this novel.")
-
-    # ── Step 5: Fetch chapter content ────────────────────────────────────────
-    if args.no_fetch:
-        logger.info("--no-fetch set: skipping chapter content fetching.")
-    else:
-        logger.info("Starting chapter content fetch...")
-        fetch_chapters()
+        # ── Step 5: Fetch chapter content ────────────────────────────────────────
+        if args.no_fetch:
+            logger.info("--no-fetch set: skipping chapter content fetching.")
+        else:
+            logger.info("Starting chapter content fetch...")
+            scraper.fetch_chapters()
 
     logger.info("Pipeline complete.")
 

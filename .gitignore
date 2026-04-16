@@ -22,3 +22,5 @@ temp_ng.zip
 Novel_EPUB_Destination/*.epub
 !Novel_EPUB_Destination/.gitkeep
 covers/
+output.json
+*.html

@@ -1,8 +1,11 @@
 import sqlite3
 
 
+from core.config import DB_PATH
+
+
 def create_pure_schema():
-    conn = sqlite3.connect("novels.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     # 1. The Novels Table

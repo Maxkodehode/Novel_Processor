@@ -4,7 +4,7 @@ import logging
 from bs4 import BeautifulSoup
 
 from .base import BaseAdapter
-from utils import slugify
+from utils.text import slugify
 
 logger = logging.getLogger(__name__)
 
