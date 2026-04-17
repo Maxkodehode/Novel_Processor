@@ -1,4 +1,5 @@
 import sqlite3
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -326,6 +327,98 @@ async def upsert_note(note: NoteUpdate):
     app.state.db.execute(query, (note.chapter_id, note.content))
     app.state.db.commit()
     return {"status": "ok"}
+
+
+# --- Chapter Management (Discovery/Update) ---
+
+
+def run_background_fetch(novel_id: int, mode: str):
+    """
+    Background worker for fetching or updating chapters.
+    mode: 'fetch' or 'update'
+    """
+    from core import DatabaseManager, NovelRepository, NetworkClient
+    from services import BrowserService, CoverManager, ScraperService
+
+    # Instantiate the full stack as in main.py
+    db_manager = DatabaseManager()
+    repository = NovelRepository(db_manager)
+    network_client = NetworkClient()
+    browser_service = BrowserService()
+    cover_manager = CoverManager(network_client, repository)
+    scraper = ScraperService(network_client, browser_service, repository, cover_manager)
+
+    try:
+        # Get source_url
+        novel = repository.get_novel_by_id(novel_id)
+        if not novel:
+            print(f"[BG] Novel {novel_id} not found.")
+            return
+
+        url = novel["source_url"]
+
+        with browser_service:
+            if mode == "update":
+                print(f"[BG] Updating novel {novel_id}: {url}")
+                data = scraper.scrape_novel(url)
+                if data:
+                    # Update chapter list (new chapters only)
+                    repository.upsert_chapters(novel_id, data.get("chapters", []))
+
+            print(f"[BG] Fetching chapter content for novel {novel_id}")
+            scraper.fetch_chapters(novel_id)
+
+            # Update content_status to 'full'
+            repository.update_content_status(novel_id, "full")
+
+            if mode == "update":
+                repository.update_novel_timestamp(novel_id)
+
+            print(f"[BG] Completed {mode} for novel {novel_id}")
+
+    except Exception as e:
+        print(f"[BG] Error during {mode} for novel {novel_id}: {e}")
+
+
+@app.post("/api/novels/{novel_id}/fetch-chapters")
+async def trigger_fetch_chapters(novel_id: int):
+    asyncio.get_event_loop().run_in_executor(
+        None, run_background_fetch, novel_id, "fetch"
+    )
+    return {"status": "started", "novel_id": novel_id}
+
+
+@app.post("/api/novels/{novel_id}/update-chapters")
+async def trigger_update_chapters(novel_id: int):
+    asyncio.get_event_loop().run_in_executor(
+        None, run_background_fetch, novel_id, "update"
+    )
+    return {"status": "started", "novel_id": novel_id}
+
+
+@app.get("/api/novels/{novel_id}/fetch-status")
+async def get_fetch_status(novel_id: int):
+    # Check if novel exists
+    novel = app.state.db.execute(
+        "SELECT content_status FROM novels WHERE id = ?", (novel_id,)
+    ).fetchone()
+    if not novel:
+        raise HTTPException(status_code=404, detail="Novel not found")
+
+    total_chapters = app.state.db.execute(
+        "SELECT COUNT(*) as count FROM chapters WHERE novel_id = ?", (novel_id,)
+    ).fetchone()["count"]
+
+    downloaded_chapters = app.state.db.execute(
+        "SELECT COUNT(*) as count FROM chapters WHERE novel_id = ? AND plain_content IS NOT NULL",
+        (novel_id,),
+    ).fetchone()["count"]
+
+    return {
+        "content_status": novel["content_status"],
+        "total_chapters": total_chapters,
+        "downloaded_chapters": downloaded_chapters,
+    }
 
 
 # --- Static Files ---

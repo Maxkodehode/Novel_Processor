@@ -21,7 +21,20 @@ def create_pure_schema():
         cover_url TEXT,
         slug TEXT NOT NULL UNIQUE,
         language TEXT NOT NULL,
-        status TEXT DEFAULT 'ACTIVE'
+        status TEXT DEFAULT 'ACTIVE',
+        content_status TEXT NOT NULL DEFAULT 'metadata'
+    )
+    """)
+
+    # New novel_sources table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS novel_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER,
+        source_site TEXT,
+        source_url TEXT UNIQUE,
+        discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels (id)
     )
     """)
 

@@ -29,6 +29,8 @@ class ScraperService:
     def scrape_novel(
         self, url: str, use_local: str = None, save_html: str = None
     ) -> dict | None:
+        from adapters.scribblehub import ScribbleHubAdapter
+
         adapter = get_adapter(url)
         logger.info(f"Using adapter: {type(adapter).__name__}")
 
@@ -36,6 +38,17 @@ class ScraperService:
         if use_local and os.path.exists(use_local):
             with open(use_local, "r", encoding="utf-8") as f:
                 html = f.read()
+
+        if not html and isinstance(adapter, ScribbleHubAdapter):
+            logger.info(f"Forcing Playwright for ScribbleHub: {url}")
+            html, pw_page = self.browser.get_page_content(url)
+            adapter._pw_page = pw_page
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+                data = adapter.parse(soup, url)
+                return data
+            finally:
+                adapter._pw_page = None
 
         if not html:
             logger.info(f"Attempting fast fetch: {url}")
@@ -47,7 +60,8 @@ class ScraperService:
                 logger.warning(f"Fast fetch failed: {e}. Falling back to Browser...")
 
         if not html:
-            html, _ = self.browser.get_page_content(url)
+            html, pw_page = self.browser.get_page_content(url)
+            adapter._pw_page = pw_page
             if save_html:
                 with open(save_html, "w", encoding="utf-8") as f:
                     f.write(html)
@@ -57,15 +71,20 @@ class ScraperService:
             logger.error(f"Failed to get content for {url}")
             return None
 
-        soup = BeautifulSoup(html, "html.parser")
-        data = adapter.parse(soup, url)
-        return data
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            data = adapter.parse(soup, url)
+            return data
+        finally:
+            adapter._pw_page = None
 
-    def populate_novel(self, data: dict) -> int | None:
+    def populate_novel(self, data: dict, metadata_only: bool = False) -> int | None:
         slug = data.get("slug") or slugify(data["title"])
         novel_id = self.repository.upsert_novel(data, slug)
         if novel_id:
-            self.repository.upsert_chapters(novel_id, data.get("chapters", []))
+            if not metadata_only:
+                self.repository.upsert_chapters(novel_id, data.get("chapters", []))
+
             self.repository.link_tags(novel_id, data.get("tags", []))
 
             # Download cover
@@ -73,10 +92,13 @@ class ScraperService:
             if cover_url:
                 self.cover_manager.download_and_save(cover_url, novel_id, slug)
 
+        if novel_id and metadata_only:
+            self.repository.update_content_status(novel_id, "metadata")
+
         return novel_id
 
-    def fetch_chapters(self):
-        tasks = self.repository.get_pending_chapters()
+    def fetch_chapters(self, novel_id: int = None):
+        tasks = self.repository.get_pending_chapters(novel_id)
         if not tasks:
             logger.info("All chapters are up to date.")
             return

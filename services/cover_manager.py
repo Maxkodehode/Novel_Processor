@@ -27,10 +27,36 @@ class CoverManager:
             return relative_path
 
         try:
-            response = self.network.get(cover_url)
+            headers = {}
+            if any(
+                domain in cover_url.lower()
+                for domain in ["fanfiction.net", "ff.net", "ffn"]
+            ):
+                from core.config import USER_AGENT
+
+                headers = {
+                    "Referer": "https://www.fanfiction.net/",
+                    "User-Agent": USER_AGENT,
+                }
+
+            response = self.network.get(cover_url, headers=headers)
             if response.status_code == 200:
+                if len(response.content) == 0:
+                    logger.warning(
+                        f"Downloaded 0-byte cover from {cover_url}, skipping."
+                    )
+                    return None
+
                 with open(relative_path, "wb") as f:
                     f.write(response.content)
+
+                if os.path.getsize(relative_path) == 0:
+                    logger.warning(
+                        f"Saved 0-byte cover file: {relative_path}, deleting."
+                    )
+                    os.remove(relative_path)
+                    return None
+
                 logger.info(f"Cover saved: {relative_path}")
                 self.repository.update_cover_path(novel_id, relative_path)
                 return relative_path

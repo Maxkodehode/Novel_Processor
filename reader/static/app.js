@@ -67,7 +67,10 @@ const api = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
-    })
+    }),
+    fetchChapters: (id) => api.fetch(`/api/novels/${id}/fetch-chapters`, { method: 'POST' }),
+    updateChapters: (id) => api.fetch(`/api/novels/${id}/update-chapters`, { method: 'POST' }),
+    getFetchStatus: (id) => api.fetch(`/api/novels/${id}/fetch-status`)
 };
 
 // --- Utils ---
@@ -105,8 +108,19 @@ function applySettings() {
     const s = currentState.settings;
     const root = document.documentElement;
     
-    document.documentElement.setAttribute('data-theme', s.theme);
+    root.setAttribute('data-theme', s.theme);
+    root.style.setProperty('--font-size', s.fontSize + 'px');
+    root.style.setProperty('--line-height', s.lineHeight);
+    root.style.setProperty('--paragraph-spacing', s.paragraphSpacing + 'em');
+    root.style.setProperty('--font-family', s.fontFamily);
+    root.style.setProperty('--content-width', s.columnWidth);
     
+    // Update labels
+    if ($('font-size-label')) $('font-size-label').textContent = s.fontSize + 'px';
+    if ($('line-height-label')) $('line-height-label').textContent = s.lineHeight;
+    if ($('para-spacing-label')) $('para-spacing-label').textContent = s.paragraphSpacing + 'em';
+    if ($('column-width-label')) $('column-width-label').textContent = s.columnWidth;
+
     if (s.customBg) root.style.setProperty('--bg-primary', s.customBg);
     else root.style.removeProperty('--bg-primary');
     
@@ -228,7 +242,7 @@ async function renderNovel(id) {
     currentState.novel = novel;
     
     const details = $('novel-details');
-    const initials = novel.title.split(' ').map(w => w[0]).join('').substring(0, 3).toUpperCase();
+    const initials = (novel.title || '').split(' ').map(w => w[0]).join('').substring(0, 3).toUpperCase();
     
     details.innerHTML = `
         <div class="novel-cover-wrapper">
@@ -237,19 +251,26 @@ async function renderNovel(id) {
         </div>
         <div class="novel-info-text">
             <h2>${novel.title}</h2>
-            <div class="novel-actions" style="margin-bottom: 20px">
-                <button id="continue-reading-btn" class="primary-btn">Continue Reading</button>
-            </div>
             <p><strong>Author:</strong> ${novel.author || 'Unknown'}</p>
             <p><strong>Status:</strong> ${novel.status}</p>
-            <div class="tags">${novel.tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
+            <p><strong>Content:</strong> ${novel.content_status || 'metadata'}</p>
+            <div class="novel-actions" style="margin: 15px 0">
+                <button id="continue-reading-btn" class="primary-btn">Continue Reading</button>
+            </div>
+            <div class="tags">${(novel.tags || []).map(t => `<span class="tag">${t}</span>`).join('')}</div>
             <div class="synopsis">${novel.synopsis || 'No synopsis available.'}</div>
+            
+            <div id="chapter-actions" class="chapter-actions" style="margin: 20px 0; padding: 15px; background: var(--bg-secondary); border-radius: 8px;">
+                <!-- Button injected here -->
+            </div>
         </div>
     `;
+
+    renderChapterActionButton(novel);
     
     const list = $('chapter-list');
     list.innerHTML = '';
-    novel.chapters.forEach(ch => {
+    (novel.chapters || []).forEach(ch => {
         const li = document.createElement('li');
         li.className = 'chapter-item';
         li.innerHTML = `
@@ -268,10 +289,76 @@ async function renderNovel(id) {
             
         if (novelProgress.length > 0) {
             navigateTo(VIEWS.READER, { id: novelProgress[0].chapter_id });
-        } else if (novel.chapters.length > 0) {
+        } else if (novel.chapters && novel.chapters.length > 0) {
             navigateTo(VIEWS.READER, { id: novel.chapters[0].id });
         }
     };
+}
+
+let fetchStatusInterval = null;
+
+function renderChapterActionButton(novel) {
+    const container = $('chapter-actions');
+    if (!container) return;
+
+    if (fetchStatusInterval) {
+        clearInterval(fetchStatusInterval);
+        fetchStatusInterval = null;
+    }
+
+    const status = novel.content_status || 'metadata';
+
+    if (status === 'discovered' || status === 'metadata') {
+        container.innerHTML = `<button id="fetch-chapters-btn" class="primary-btn">Download Chapters</button>`;
+        $('fetch-chapters-btn').onclick = async () => {
+            await api.fetchChapters(novel.id);
+            startPollingFetchStatus(novel.id);
+        };
+    } else if (status === 'full') {
+        container.innerHTML = `<button id="update-chapters-btn" class="primary-btn">Update Chapters</button>`;
+        $('update-chapters-btn').onclick = async () => {
+            await api.updateChapters(novel.id);
+            startPollingFetchStatus(novel.id);
+        };
+    }
+}
+
+function startPollingFetchStatus(novelId) {
+    const container = $('chapter-actions');
+    container.innerHTML = `
+        <div class="fetch-progress">
+            <p id="fetch-status-text">Starting download...</p>
+            <div class="progress-bar-container" style="margin-top: 10px">
+                <div id="fetch-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+        </div>
+    `;
+
+    fetchStatusInterval = setInterval(async () => {
+        try {
+            const data = await api.getFetchStatus(novelId);
+            const text = $('fetch-status-text');
+            const fill = $('fetch-progress-fill');
+
+            if (text && fill) {
+                const progress = data.total_chapters > 0 ? (data.downloaded_chapters / data.total_chapters) * 100 : 0;
+                text.textContent = `Downloading... ${data.downloaded_chapters} / ${data.total_chapters} chapters`;
+                fill.style.width = `${progress}%`;
+
+                if (data.downloaded_chapters >= data.total_chapters && data.content_status === 'full') {
+                    clearInterval(fetchStatusInterval);
+                    fetchStatusInterval = null;
+                    text.textContent = '✓ Download complete';
+                    setTimeout(() => {
+                        navigateTo(VIEWS.NOVEL, { id: novelId });
+                    }, 3000);
+                }
+            }
+        } catch (e) {
+            console.error("Polling error:", e);
+            clearInterval(fetchStatusInterval);
+        }
+    }, 3000);
 }
 
 let scrollSaveTimeout = null;

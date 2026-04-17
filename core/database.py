@@ -9,10 +9,12 @@ class DatabaseManager:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
 
-    def execute(self, query, params=(), commit=False):
+    def execute(self, query, params=(), commit=False, row_factory=None):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("PRAGMA foreign_keys = ON")
+                if row_factory:
+                    conn.row_factory = row_factory
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 results = cursor.fetchall()
@@ -124,7 +126,10 @@ class NovelRepository:
         query = "UPDATE novels SET cover_path = ? WHERE id = ?"
         self.db.execute(query, (cover_path, novel_id), commit=True)
 
-    def get_pending_chapters(self):
+    def get_pending_chapters(self, novel_id: int = None):
+        if novel_id is not None:
+            query = "SELECT id, chapter_title, chapter_url FROM chapters WHERE plain_content IS NULL AND novel_id = ?"
+            return self.db.execute(query, (novel_id,))
         query = "SELECT id, chapter_title, chapter_url FROM chapters WHERE plain_content IS NULL"
         return self.db.execute(query)
 
@@ -143,6 +148,14 @@ class NovelRepository:
             query, (content_text, raw_html, chapter_hash, ch_id), commit=True
         )
 
+    def get_novel_by_id(self, novel_id: int):
+        """Retrieves a novel's data by its ID."""
+        query = "SELECT * FROM novels WHERE id = ?"
+        rows = self.db.execute(query, (novel_id,), row_factory=sqlite3.Row)
+        if rows:
+            return rows[0]
+        return None
+
     def get_active_novels(self):
         query = "SELECT id, title, source_url, last_updated FROM novels WHERE status = 'ACTIVE'"
         return self.db.execute(query)
@@ -151,6 +164,45 @@ class NovelRepository:
         query = "SELECT chapter_order, chapter_url, id FROM chapters WHERE novel_id = ? ORDER BY chapter_order"
         rows = self.db.execute(query, (novel_id,))
         return {row[0]: {"url": row[1], "id": row[2]} for row in rows}
+
+    def is_url_known(self, url: str) -> bool:
+        """Checks if a URL exists in 'novels' or 'novel_sources'."""
+        q1 = "SELECT 1 FROM novels WHERE source_url = ?"
+        if self.db.execute(q1, (url,)):
+            return True
+        q2 = "SELECT 1 FROM novel_sources WHERE source_url = ?"
+        if self.db.execute(q2, (url,)):
+            return True
+        return False
+
+    def get_all_novels_for_fuzzy(self) -> list[tuple[int, str]]:
+        """Returns all novel IDs and titles for fuzzy matching."""
+        return self.db.execute("SELECT id, title FROM novels")
+
+    def add_novel_source(self, novel_id: int, site: str, url: str):
+        """Adds a source URL to an existing novel."""
+        query = "INSERT INTO novel_sources (novel_id, source_site, source_url) VALUES (?, ?, ?)"
+        self.db.execute(query, (novel_id, site, url), commit=True)
+
+    def insert_discovered_novel(self, title: str, url: str, slug: str) -> int:
+        """Inserts a new novel with 'discovered' status."""
+        query = """
+            INSERT INTO novels (title, source_url, slug, language, content_status)
+            VALUES (?, ?, ?, 'en', 'discovered')
+            RETURNING id
+        """
+        # Note: DatabaseManager.execute returns list of rows
+        rows = self.db.execute(query, (title, url, slug), commit=True)
+        if rows:
+            return rows[0][0]
+        # Fallback for older sqlite
+        row = self.db.execute("SELECT id FROM novels WHERE title = ?", (title,))
+        return row[0][0]
+
+    def update_content_status(self, novel_id: int, status: str):
+        """Updates the content_status of a novel."""
+        query = "UPDATE novels SET content_status = ? WHERE id = ?"
+        self.db.execute(query, (status, novel_id), commit=True)
 
     def update_novel_timestamp(self, novel_id: int):
         query = "UPDATE novels SET last_updated = CURRENT_TIMESTAMP WHERE id = ?"
