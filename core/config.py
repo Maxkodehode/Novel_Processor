@@ -10,6 +10,7 @@ USER_AGENT = (
 )
 FETCH_DELAY = 8  # seconds between requests
 TIMEOUT = 30
+FETCH_MAX_RETRIES = 2
 
 # Files
 COVERS_DIR = "covers"

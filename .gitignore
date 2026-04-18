@@ -30,6 +30,7 @@ Novel_EPUB_Destination/*.epub
 !Novel_EPUB_Destination/.gitkeep
 covers/
 output.json
+logs/
 *.html
 !reader/static/index.html
 

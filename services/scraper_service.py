@@ -6,7 +6,8 @@ from bs4 import BeautifulSoup
 from adapters import get_adapter
 from core.network import NetworkClient
 from core.database import NovelRepository
-from core.config import FETCH_DELAY
+from core.config import FETCH_DELAY, TIMEOUT, FETCH_MAX_RETRIES
+from core.run_logger import RunLogger
 from services import BrowserService, CoverManager
 from utils import slugify
 
@@ -97,6 +98,28 @@ class ScraperService:
 
         return novel_id
 
+    def refresh_metadata(self, novel_id: int) -> bool:
+        rows = self.repository.db.execute(
+            "SELECT source_url FROM novels WHERE id = ?", (novel_id,)
+        )
+        if not rows:
+            logger.warning(f"Metadata refresh: Novel {novel_id} not found in DB")
+            return False
+
+        url = rows[0][0]
+        if not url:
+            logger.warning(f"Metadata refresh: No source_url for novel {novel_id}")
+            return False
+
+        logger.info(f"Refreshing metadata for novel {novel_id}: {url}")
+        data = self.scrape_novel(url)
+        if not data:
+            logger.warning(f"Metadata refresh: Failed to scrape {url}")
+            return False
+
+        self.populate_novel(data, metadata_only=True)
+        return True
+
     def fetch_chapters(self, novel_id: int = None):
         tasks = self.repository.get_pending_chapters(novel_id)
         if not tasks:
@@ -105,33 +128,68 @@ class ScraperService:
 
         logger.info(f"Starting fetch for {len(tasks)} chapters...")
 
-        for ch_id, title, url in tasks:
-            try:
-                logger.info(f"Fetching: {title}")
-                adapter = get_adapter(url)
-                response = self.network.get(url)
+        with RunLogger(total_pending=len(tasks)) as log:
+            for ch_id, title, url in tasks:
+                start_time = time.time()
+                success = False
+                error_msg = ""
 
-                if response.status_code != 200:
-                    logger.warning(f"HTTP {response.status_code} for {url}")
-                    continue
+                for attempt in range(
+                    1, FETCH_MAX_RETRIES + 2
+                ):  # +1 for initial try, then retries
+                    try:
+                        logger.info(f"Fetching: {title} (Attempt {attempt})")
+                        adapter = get_adapter(url)
+                        response = self.network.get(url, timeout=TIMEOUT)
 
-                soup = BeautifulSoup(response.text, "html.parser")
-                content_data = adapter.parse_chapter_content(soup)
+                        if response.status_code != 200:
+                            raise Exception(f"HTTP {response.status_code}")
 
-                if not content_data or "plain_text" not in content_data:
-                    logger.error(f"Invalid content for {url}")
-                    continue
+                        soup = BeautifulSoup(response.text, "html.parser")
+                        content_data = adapter.parse_chapter_content(soup)
 
-                content_text = content_data["plain_text"]
-                raw_html = content_data.get("raw_html", "")
-                chapter_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+                        if not content_data or "plain_text" not in content_data:
+                            raise Exception("Invalid content parsed")
 
-                self.repository.update_chapter_content(
-                    ch_id, content_text, raw_html, chapter_hash
-                )
-                logger.info(f"Saved '{title}'.")
+                        content_text = content_data["plain_text"]
+                        raw_html = content_data.get("raw_html", "")
+                        chapter_hash = hashlib.sha256(
+                            content_text.encode("utf-8")
+                        ).hexdigest()
 
-            except Exception as e:
-                logger.exception(f"Error processing {url}: {e}")
-            finally:
+                        self.repository.update_chapter_content(
+                            ch_id, content_text, raw_html, chapter_hash
+                        )
+
+                        elapsed = time.time() - start_time
+                        word_count = len(content_text.split())
+                        log.ok(ch_id, title, word_count, elapsed)
+                        logger.info(f"Saved '{title}'.")
+
+                        success = True
+
+                        # Memory cleanup
+                        del soup
+                        del response
+                        del content_data
+                        break
+
+                    except Exception as e:
+                        error_msg = str(e)
+                        if attempt <= FETCH_MAX_RETRIES:
+                            logger.warning(f"Retry {attempt} for {title}: {error_msg}")
+                            log.retry(ch_id, title, attempt, error_msg)
+                            # Exponential backoff: 5s, 15s
+                            backoff = 5 if attempt == 1 else 15
+                            time.sleep(backoff)
+                        else:
+                            logger.error(
+                                f"Failed to fetch {title} after {attempt} attempts: {error_msg}"
+                            )
+                            log.fail(ch_id, title, error_msg)
+
+                if not success:
+                    # Final attempt failed
+                    pass
+
                 time.sleep(FETCH_DELAY)

@@ -113,9 +113,17 @@ async def get_novels(
 
 @app.get("/api/tags")
 async def get_tags():
-    query = "SELECT name FROM tags ORDER BY name ASC"
+    query = """
+    SELECT t.name, COUNT(nt.novel_id) as novel_count
+    FROM tags t
+    LEFT JOIN novel_tags nt ON t.id = nt.tag_id
+    GROUP BY t.id, t.name
+    ORDER BY novel_count DESC, t.name ASC
+    """
     cursor = app.state.db.execute(query)
-    return [row["name"] for row in cursor.fetchall()]
+    return [
+        {"name": row["name"], "count": row["novel_count"]} for row in cursor.fetchall()
+    ]
 
 
 @app.get("/api/novels/{novel_id}")
@@ -349,32 +357,26 @@ def run_background_fetch(novel_id: int, mode: str):
     scraper = ScraperService(network_client, browser_service, repository, cover_manager)
 
     try:
-        # Get source_url
-        novel = repository.get_novel_by_id(novel_id)
-        if not novel:
-            print(f"[BG] Novel {novel_id} not found.")
-            return
+        # 1. Refresh Metadata
+        success = scraper.refresh_metadata(novel_id)
+        if not success:
+            import logging
 
-        url = novel["source_url"]
+            logging.getLogger(__name__).warning(
+                f"Metadata refresh failed for novel {novel_id}, proceeding anyway"
+            )
 
-        with browser_service:
-            if mode == "update":
-                print(f"[BG] Updating novel {novel_id}: {url}")
-                data = scraper.scrape_novel(url)
-                if data:
-                    # Update chapter list (new chapters only)
-                    repository.upsert_chapters(novel_id, data.get("chapters", []))
+        # 2. Fetch Chapters
+        print(f"[BG] Fetching chapter content for novel {novel_id}")
+        scraper.fetch_chapters(novel_id)
 
-            print(f"[BG] Fetching chapter content for novel {novel_id}")
-            scraper.fetch_chapters(novel_id)
+        # Update content_status to 'full'
+        repository.update_content_status(novel_id, "full")
 
-            # Update content_status to 'full'
-            repository.update_content_status(novel_id, "full")
+        if mode == "update":
+            repository.update_novel_timestamp(novel_id)
 
-            if mode == "update":
-                repository.update_novel_timestamp(novel_id)
-
-            print(f"[BG] Completed {mode} for novel {novel_id}")
+        print(f"[BG] Completed {mode} for novel {novel_id}")
 
     except Exception as e:
         print(f"[BG] Error during {mode} for novel {novel_id}: {e}")

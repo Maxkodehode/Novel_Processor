@@ -107,14 +107,14 @@ function saveSettings() {
 function applySettings() {
     const s = currentState.settings;
     const root = document.documentElement;
-    
+
     root.setAttribute('data-theme', s.theme);
     root.style.setProperty('--font-size', s.fontSize + 'px');
     root.style.setProperty('--line-height', s.lineHeight);
     root.style.setProperty('--paragraph-spacing', s.paragraphSpacing + 'em');
     root.style.setProperty('--font-family', s.fontFamily);
     root.style.setProperty('--content-width', s.columnWidth);
-    
+
     // Update labels
     if ($('font-size-label')) $('font-size-label').textContent = s.fontSize + 'px';
     if ($('line-height-label')) $('line-height-label').textContent = s.lineHeight;
@@ -123,22 +123,22 @@ function applySettings() {
 
     if (s.customBg) root.style.setProperty('--bg-primary', s.customBg);
     else root.style.removeProperty('--bg-primary');
-    
+
     if (s.customText) root.style.setProperty('--text-primary', s.customText);
     else root.style.removeProperty('--text-primary');
-    
+
     root.style.setProperty('--font-family', s.fontFamily);
     root.style.setProperty('--font-size', `${s.fontSize}px`);
     root.style.setProperty('--line-height', s.lineHeight);
     root.style.setProperty('--paragraph-spacing', `${s.paragraphSpacing}em`);
     root.style.setProperty('--content-width', s.columnWidth);
-    
+
     // Update UI controls
     $('font-size-label').textContent = `${s.fontSize}px`;
     $('line-height-label').textContent = s.lineHeight;
     $('para-spacing-label').textContent = `${s.paragraphSpacing}em`;
     $('column-width-label').textContent = s.columnWidth;
-    
+
     $('font-size-range').value = s.fontSize;
     $('line-height-range').value = s.lineHeight;
     $('para-spacing-range').value = s.paragraphSpacing;
@@ -154,7 +154,7 @@ async function navigateTo(view, params = {}) {
     Object.values(VIEWS).forEach(v => hide($(v)));
     show($(view));
     currentState.view = view;
-    
+
     if (view === VIEWS.LIBRARY) {
         await renderLibrary();
     } else if (view === VIEWS.NOVEL) {
@@ -179,17 +179,17 @@ async function renderLibrary() {
         exclude_tags: currentState.filter.excludeTags,
         sort_by: currentState.filter.sortBy
     });
-    
+
     const grid = $('novel-grid');
     grid.innerHTML = '';
-    
+
     novels.forEach(n => {
         const card = document.createElement('div');
         card.className = 'novel-card';
         const progress = n.chapter_count > 0 ? (n.chapters_read / n.chapter_count) * 100 : 0;
-        
+
         const initials = n.title.split(' ').map(w => w[0]).join('').substring(0, 3).toUpperCase();
-        
+
         card.innerHTML = `
             ${n.cover_path ? `<img src="/api/covers/${n.id}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">` : ''}
             <div class="placeholder-cover" style="${n.cover_path ? 'display:none' : 'display:flex'}">${initials}</div>
@@ -208,17 +208,66 @@ async function renderLibrary() {
 }
 
 function renderTagFilters() {
-    const container = $('tag-filter-container');
-    container.innerHTML = '';
-    
-    allTags.forEach(tag => {
+    const section = $('tag-filter-section');
+
+    // Remove everything inside the section and rebuild from scratch.
+    // This avoids the conflict with the hardcoded <h4> in index.html
+    // and prevents duplicate headers on subsequent calls.
+    section.innerHTML = '';
+
+    // --- Collapsible header ---
+    const header = document.createElement('div');
+    header.className = 'tag-panel-header';
+    header.style.cursor = 'pointer';
+    header.style.marginBottom = '8px';
+    header.style.fontWeight = 'bold';
+    header.style.display = 'flex';
+    header.style.alignItems = 'center';
+
+    const title = document.createElement('h4');
+    title.id = 'tag-panel-title';
+    title.style.margin = '0';
+    header.appendChild(title);
+    section.appendChild(header);
+
+    // --- Tag container ---
+    const container = document.createElement('div');
+    container.id = 'tag-filter-container';
+    container.className = 'tag-filter-container';
+    section.appendChild(container);
+
+    // --- Collapse toggle ---
+    const setTagPanelState = (open) => {
+        container.style.display = open ? 'flex' : 'none';
+        title.textContent = open ? 'Filter by Tags ▼' : 'Filter by Tags ▶';
+        localStorage.setItem('tagPanelOpen', String(open));
+    };
+
+    header.onclick = () => {
+        const isOpen = container.style.display !== 'none';
+        setTagPanelState(!isOpen);
+    };
+
+    // Default state: collapsed unless active filters or user previously opened it
+    const hasActiveFilters = currentState.filter.includeTags.length > 0 || currentState.filter.excludeTags.length > 0;
+    const savedState = localStorage.getItem('tagPanelOpen');
+    setTagPanelState(hasActiveFilters || savedState === 'true');
+
+    // --- Render tag chips ---
+    // allTags items are objects: { name: string, count: number }
+    allTags.forEach(tagObj => {
+        const tag = tagObj.name;       // always a plain string from here on
+        const count = tagObj.count;
+
         const el = document.createElement('span');
         el.className = 'filter-tag';
         if (currentState.filter.includeTags.includes(tag)) el.classList.add('include');
         if (currentState.filter.excludeTags.includes(tag)) el.classList.add('exclude');
-        
-        el.textContent = tag;
-        el.onclick = () => {
+
+        el.textContent = `${tag} (${count})`;
+
+        el.onclick = (e) => {
+            e.stopPropagation();
             if (el.classList.contains('include')) {
                 el.classList.remove('include');
                 el.classList.add('exclude');
@@ -233,6 +282,7 @@ function renderTagFilters() {
             }
             renderLibrary();
         };
+
         container.appendChild(el);
     });
 }
@@ -240,10 +290,16 @@ function renderTagFilters() {
 async function renderNovel(id) {
     const novel = await api.getNovel(id);
     currentState.novel = novel;
-    
+
     const details = $('novel-details');
     const initials = (novel.title || '').split(' ').map(w => w[0]).join('').substring(0, 3).toUpperCase();
-    
+
+    // novel.tags comes from /api/novels/{id} which returns plain strings — safe to use directly
+    const tagsHtml = (novel.tags || []).map(t => {
+        const name = typeof t === 'object' ? t.name : t;
+        return `<span class="tag">${name}</span>`;
+    }).join('');
+
     details.innerHTML = `
         <div class="novel-cover-wrapper">
             ${novel.cover_path ? `<img src="/api/covers/${novel.id}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">` : ''}
@@ -257,7 +313,7 @@ async function renderNovel(id) {
             <div class="novel-actions" style="margin: 15px 0">
                 <button id="continue-reading-btn" class="primary-btn">Continue Reading</button>
             </div>
-            <div class="tags">${(novel.tags || []).map(t => `<span class="tag">${t}</span>`).join('')}</div>
+            <div class="tags">${tagsHtml}</div>
             <div class="synopsis">${novel.synopsis || 'No synopsis available.'}</div>
             
             <div id="chapter-actions" class="chapter-actions" style="margin: 20px 0; padding: 15px; background: var(--bg-secondary); border-radius: 8px;">
@@ -267,7 +323,7 @@ async function renderNovel(id) {
     `;
 
     renderChapterActionButton(novel);
-    
+
     const list = $('chapter-list');
     list.innerHTML = '';
     (novel.chapters || []).forEach(ch => {
@@ -280,13 +336,13 @@ async function renderNovel(id) {
         li.onclick = () => navigateTo(VIEWS.READER, { id: ch.id });
         list.appendChild(li);
     });
-    
+
     $('continue-reading-btn').onclick = async () => {
         const allProgress = await api.getProgress();
         const novelProgress = allProgress
             .filter(p => p.novel_id === novel.id)
             .sort((a, b) => new Date(b.read_at) - new Date(a.read_at));
-            
+
         if (novelProgress.length > 0) {
             navigateTo(VIEWS.READER, { id: novelProgress[0].chapter_id });
         } else if (novel.chapters && novel.chapters.length > 0) {
@@ -327,13 +383,14 @@ function startPollingFetchStatus(novelId) {
     const container = $('chapter-actions');
     container.innerHTML = `
         <div class="fetch-progress">
-            <p id="fetch-status-text">Starting download...</p>
+            <p id="fetch-status-text">Refreshing metadata...</p>
             <div class="progress-bar-container" style="margin-top: 10px">
                 <div id="fetch-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
             </div>
         </div>
     `;
 
+    const startTime = Date.now();
     fetchStatusInterval = setInterval(async () => {
         try {
             const data = await api.getFetchStatus(novelId);
@@ -341,8 +398,15 @@ function startPollingFetchStatus(novelId) {
             const fill = $('fetch-progress-fill');
 
             if (text && fill) {
+                const elapsed = (Date.now() - startTime) / 1000;
                 const progress = data.total_chapters > 0 ? (data.downloaded_chapters / data.total_chapters) * 100 : 0;
-                text.textContent = `Downloading... ${data.downloaded_chapters} / ${data.total_chapters} chapters`;
+
+                if (data.downloaded_chapters > 0 || elapsed > 10) {
+                    text.textContent = `Downloading... ${data.downloaded_chapters} / ${data.total_chapters} chapters`;
+                } else {
+                    text.textContent = 'Refreshing metadata...';
+                }
+
                 fill.style.width = `${progress}%`;
 
                 if (data.downloaded_chapters >= data.total_chapters && data.content_status === 'full') {
@@ -367,10 +431,10 @@ let lastScrollY = 0;
 async function renderReader(id) {
     const chapter = await api.getChapter(id);
     currentState.chapter = chapter;
-    
+
     // Update UI
     $('reader-title').textContent = `${currentState.novel ? currentState.novel.title + ' > ' : ''}${chapter.chapter_title}`;
-    
+
     const contentEl = $('chapter-content');
     if (chapter.content_type === 'plain') {
         const html = chapter.content.split(/\n\n+/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
@@ -378,7 +442,7 @@ async function renderReader(id) {
     } else {
         contentEl.innerHTML = chapter.content;
     }
-    
+
     // Meta info
     const readingTime = Math.ceil(chapter.word_count / 250);
     const timeEl = document.createElement('p');
@@ -387,25 +451,25 @@ async function renderReader(id) {
     timeEl.style.color = 'var(--text-secondary)';
     timeEl.textContent = `${chapter.word_count} words • ~${readingTime} min read`;
     contentEl.prepend(timeEl);
-    
+
     // Navigation buttons
     const updateNav = (btn, targetId) => {
         btn.onclick = () => targetId ? navigateTo(VIEWS.READER, { id: targetId }) : null;
         btn.disabled = !targetId;
         btn.style.opacity = targetId ? 1 : 0.3;
     };
-    
+
     updateNav($('prev-ch-btn-top'), chapter.prev_chapter_id);
     updateNav($('next-ch-btn-top'), chapter.next_chapter_id);
     updateNav($('prev-ch-btn-bottom'), chapter.prev_chapter_id);
     updateNav($('next-ch-btn-bottom'), chapter.next_chapter_id);
-    
+
     // Progress info
     if (currentState.novel) {
         const idx = currentState.novel.chapters.findIndex(c => c.id === chapter.id);
         $('chapter-index-info').textContent = `Chapter ${idx + 1} of ${currentState.novel.chapters.length}`;
     }
-    
+
     // Restore scroll
     const allProgress = await api.getProgress();
     const prog = allProgress.find(p => p.chapter_id === id);
@@ -414,7 +478,7 @@ async function renderReader(id) {
             window.scrollTo(0, prog.scroll_position * document.body.scrollHeight);
         }, 100);
     }
-    
+
     // Bookmark status
     updateBookmarkIcon();
     // Note status
@@ -436,12 +500,12 @@ async function updateNoteIcon() {
 
 function handleScroll() {
     if (currentState.view !== VIEWS.READER || !currentState.chapter) return;
-    
+
     const scrollPos = window.scrollY / (document.body.scrollHeight - window.innerHeight || 1);
-    
+
     if (Math.abs(window.scrollY - lastScrollY) > 50) {
         lastScrollY = window.scrollY;
-        
+
         clearTimeout(scrollSaveTimeout);
         scrollSaveTimeout = setTimeout(() => {
             api.updateProgress({
@@ -522,7 +586,7 @@ $('sort-select').onchange = (e) => {
 $('bookmark-btn').onclick = async () => {
     const bookmarks = await api.getBookmarks();
     const existing = bookmarks.find(b => b.chapter_id === currentState.chapter.id);
-    
+
     if (existing) {
         await api.deleteBookmark(existing.id);
     } else {
@@ -541,7 +605,7 @@ $('notes-btn').onclick = async () => {
     const panel = $('notes-panel');
     panel.classList.toggle('hidden');
     hide($('settings-panel'));
-    
+
     if (!panel.classList.contains('hidden')) {
         const note = await api.getNote(currentState.chapter.id);
         $('note-textarea').value = note.content;
@@ -571,12 +635,12 @@ $('global-search-input').oninput = debounce(async (e) => {
     const q = e.target.value;
     if (q.length < 2) return;
     const results = await api.search(q);
-    
+
     const nResults = $('novel-results');
     nResults.innerHTML = results.novels.map(n => `
         <div class="search-result-item" onclick="app.navToNovel(${n.id})">${n.title}</div>
     `).join('');
-    
+
     const cResults = $('chapter-results');
     cResults.innerHTML = results.chapters.map(c => `
         <div class="search-result-item" onclick="app.navToChapter(${c.id})">${c.chapter_title}</div>
@@ -595,10 +659,10 @@ window.onkeydown = (e) => {
         e.preventDefault();
         toggleSearch();
     }
-    
+
     if (currentState.view === VIEWS.READER) {
         if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
-        
+
         if (e.key === 'ArrowRight' || e.key === 'l') $('next-ch-btn-top').click();
         if (e.key === 'ArrowLeft' || e.key === 'h') $('prev-ch-btn-top').click();
         if (e.key === 'b') $('bookmark-btn').click();
