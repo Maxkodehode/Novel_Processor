@@ -41,6 +41,8 @@ class NovelUpdateService:
 
     def sync_novel(self, novel_id: int, url: str):
         """Syncs a single novel by comparing chapter lists."""
+        time.sleep(FETCH_DELAY)
+
         adapter = get_adapter(url)
 
         # 1. Fetch current data from source

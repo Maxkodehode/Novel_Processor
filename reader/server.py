@@ -353,7 +353,7 @@ def run_background_fetch(novel_id: int, mode: str):
     repository = NovelRepository(db_manager)
     network_client = NetworkClient()
     browser_service = BrowserService()
-    cover_manager = CoverManager(network_client, repository)
+    cover_manager = CoverManager(network_client, repository, browser_service)
     scraper = ScraperService(network_client, browser_service, repository, cover_manager)
 
     try:
