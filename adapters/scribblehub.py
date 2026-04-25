@@ -9,8 +9,13 @@
 #     This mirrors the "Show All Chapters" button. The site signals completion
 #     by adding 'isdisabled' to #menu_icon_fic. One JS call replaces the
 #     entire pagination loop for most novels.
+#   - parse(): Fixed Strategy 1 wait condition — 'isdisabled' is set at the
+#     START of loading, not the end, so it fired too early and only returned
+#     the initial 15 chapters. Now waits for li.toc_w count to match the
+#     known chapter_count badge, with a 60s timeout for large novels.
+#     Falls back to pagination if show_all yields fewer chapters than expected.
 #   - parse(): Kept the old pagination loop as Strategy 2 (fallback) in case
-#     toc_fic_show_all() fails or is unavailable.
+#     toc_fic_show_all() fails, times out, or returns an incomplete list.
 #   - parse(): Playwright block now triggers whenever _pw_page is set,
 #     not only when last_page > 1.
 #   - _extract_chapters(): Unchanged — selector logic is correct.
@@ -164,7 +169,12 @@ class ScribbleHubAdapter(BaseAdapter):
 
             # ── Strategy 1: toc_fic_show_all() ───────────────────────────────
             # Calls the same JS function as the "Show All Chapters" button.
-            # The site signals completion by adding 'isdisabled' to #menu_icon_fic.
+            # NOTE: 'isdisabled' is added to #menu_icon_fic at the START of
+            # loading, not the end — waiting for it fires too early and returns
+            # only the initially-rendered chapters (typically 15).
+            # Instead we wait until li.toc_w count matches the known
+            # chapter_count from the badge. Timeout is generous (60s) to
+            # accommodate novels with hundreds of chapters.
             show_all_success = False
             try:
                 logger.info("[SH] Calling toc_fic_show_all() to load all chapters...")
@@ -173,28 +183,51 @@ class ScribbleHubAdapter(BaseAdapter):
 
                 pw.evaluate("toc_fic_show_all()")
 
-                # Wait for the icon to gain 'isdisabled' — the site's own "done" signal
-                pw.wait_for_function(
-                    """
-                    () => {
-                        const icon = document.querySelector('#menu_icon_fic');
-                        return icon && icon.classList.contains('isdisabled');
-                    }
-                    """,
-                    timeout=20_000,
-                )
+                if chapter_count and chapter_count > 0:
+                    # Wait until the DOM has at least as many li.toc_w elements
+                    # as the badge says there should be chapters.
+                    logger.info(
+                        f"[SH] Waiting for {chapter_count} chapters to render..."
+                    )
+                    pw.wait_for_function(
+                        f"""
+                        () => document.querySelectorAll('li.toc_w').length >= {chapter_count}
+                        """,
+                        timeout=60_000,
+                    )
+                else:
+                    # No known count — fall back to waiting for isdisabled
+                    # plus a generous fixed pause
+                    pw.wait_for_function(
+                        """
+                        () => {
+                            const icon = document.querySelector('#menu_icon_fic');
+                            return icon && icon.classList.contains('isdisabled');
+                        }
+                        """,
+                        timeout=30_000,
+                    )
+                    pw.wait_for_timeout(2000)
 
-                # Brief pause for DOM to finish rendering all <li> elements
-                pw.wait_for_timeout(800)
+                # Extra small pause for any final DOM settling
+                pw.wait_for_timeout(500)
 
                 full_soup = BeautifulSoup(pw.content(), "html.parser")
                 chapters_by_order.clear()
                 _extract_chapters(full_soup)
 
-                logger.info(
-                    f"[SH] show_all succeeded — {len(chapters_by_order)} chapters found."
-                )
-                show_all_success = True
+                found = len(chapters_by_order)
+                logger.info(f"[SH] show_all complete — {found} chapters found.")
+
+                # Cross-check: if we got significantly fewer than expected,
+                # don't trust the result — fall through to pagination loop.
+                if chapter_count and found < chapter_count * 0.9:
+                    logger.warning(
+                        f"[SH] show_all returned {found}/{chapter_count} chapters "
+                        f"— below 90% threshold, falling back to pagination."
+                    )
+                else:
+                    show_all_success = True
 
             except Exception as e:
                 logger.warning(

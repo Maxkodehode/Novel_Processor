@@ -1,3 +1,16 @@
+# =============================================================================
+# CHANGES:
+#   - run_background_fetch(): Fixed CoverManager instantiation — was passing
+#     3 args (including browser_service) but CoverManager.__init__ only takes 2.
+#   - Added DEBUG flag and file-based logging for background fetch operations.
+#     When DEBUG=True, all background fetch output goes to ~/Desktop/reader_debug.log
+#     so it can be easily retrieved and shared.
+#   - All other endpoints unchanged — content_status, reading_progress,
+#     bookmarks, and notes are all intentional features.
+# =============================================================================
+
+import logging
+import os
 import sqlite3
 import asyncio
 from contextlib import asynccontextmanager
@@ -11,8 +24,33 @@ from pydantic import BaseModel
 
 from core.config import DB_PATH
 
+DEBUG = False
+DEBUG_LOG_PATH = os.path.expanduser("~/Desktop/reader_debug.log")
+
 # Project root for relative paths (covers)
 PROJECT_ROOT = Path(__file__).parent.parent
+
+
+def _get_debug_logger():
+    """
+    Returns a file-based logger for background fetch debug output.
+    Writes to ~/Desktop/reader_debug.log when DEBUG=True.
+
+    Returns:
+        logging.Logger: Configured logger instance.
+
+    Called by: run_background_fetch()
+    Depends on: DEBUG_LOG_PATH
+    """
+    log = logging.getLogger("reader_bg")
+    if not log.handlers:
+        handler = logging.FileHandler(DEBUG_LOG_PATH, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        log.addHandler(handler)
+        log.setLevel(logging.DEBUG if DEBUG else logging.INFO)
+    return log
 
 
 # --- Database ---
@@ -24,10 +62,8 @@ def get_db_connection():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: could do something here if needed
     app.state.db = get_db_connection()
     yield
-    # Shutdown
     app.state.db.close()
 
 
@@ -64,23 +100,22 @@ async def get_novels(
 ):
     params = []
 
-    # Base query with chapter_count, chapters_read, and word_count
     query = """
-        SELECT n.*, 
-               (SELECT COUNT(*) FROM chapters WHERE novel_id = n.id) as chapter_count,
-               (SELECT COUNT(*) FROM reading_progress WHERE novel_id = n.id AND scroll_position >= 0.9) as chapters_read,
-               (SELECT SUM(length(plain_content) - length(replace(plain_content, ' ', '')) + 1) 
-                FROM chapters WHERE novel_id = n.id AND plain_content IS NOT NULL) as word_count
-        FROM novels n
-        WHERE 1=1
-    """
+            SELECT n.*,
+                   (SELECT COUNT(*) FROM chapters WHERE novel_id = n.id) as chapter_count,
+                   (SELECT COUNT(*) FROM reading_progress WHERE novel_id = n.id AND scroll_position >= 0.9) as chapters_read,
+                   (SELECT SUM(length(plain_content) - length(replace(plain_content, ' ', '')) + 1)
+                    FROM chapters WHERE novel_id = n.id AND plain_content IS NOT NULL) as word_count
+            FROM novels n
+            WHERE 1=1 \
+            """
 
     if include_tags:
         for tag in include_tags:
             query += """
                 AND EXISTS (
-                    SELECT 1 FROM novel_tags nt 
-                    JOIN tags t ON nt.tag_id = t.id 
+                    SELECT 1 FROM novel_tags nt
+                    JOIN tags t ON nt.tag_id = t.id
                     WHERE nt.novel_id = n.id AND t.name = ?
                 )
             """
@@ -90,14 +125,13 @@ async def get_novels(
         for tag in exclude_tags:
             query += """
                 AND NOT EXISTS (
-                    SELECT 1 FROM novel_tags nt 
-                    JOIN tags t ON nt.tag_id = t.id 
+                    SELECT 1 FROM novel_tags nt
+                    JOIN tags t ON nt.tag_id = t.id
                     WHERE nt.novel_id = n.id AND t.name = ?
                 )
             """
             params.append(tag)
 
-    # Sorting
     sort_map = {
         "title": "n.title ASC",
         "last_updated": "n.last_updated DESC",
@@ -114,12 +148,12 @@ async def get_novels(
 @app.get("/api/tags")
 async def get_tags():
     query = """
-    SELECT t.name, COUNT(nt.novel_id) as novel_count
-    FROM tags t
-    LEFT JOIN novel_tags nt ON t.id = nt.tag_id
-    GROUP BY t.id, t.name
-    ORDER BY novel_count DESC, t.name ASC
-    """
+            SELECT t.name, COUNT(nt.novel_id) as novel_count
+            FROM tags t
+                     LEFT JOIN novel_tags nt ON t.id = nt.tag_id
+            GROUP BY t.id, t.name
+            ORDER BY novel_count DESC, t.name ASC \
+            """
     cursor = app.state.db.execute(query)
     return [
         {"name": row["name"], "count": row["novel_count"]} for row in cursor.fetchall()
@@ -128,31 +162,28 @@ async def get_tags():
 
 @app.get("/api/novels/{novel_id}")
 async def get_novel_detail(novel_id: int):
-    # Novel info
     novel_query = "SELECT * FROM novels WHERE id = ?"
     novel_row = app.state.db.execute(novel_query, (novel_id,)).fetchone()
     if not novel_row:
         raise HTTPException(status_code=404, detail="Novel not found")
 
-    # Chapters
     chapters_query = """
-    SELECT id, chapter_title, chapter_order,
-           (SELECT 1 FROM reading_progress WHERE chapter_id = chapters.id AND scroll_position >= 0.9) as is_read
-    FROM chapters 
-    WHERE novel_id = ? 
-    ORDER BY chapter_order ASC
-    """
+                     SELECT id, chapter_title, chapter_order,
+                            (SELECT 1 FROM reading_progress WHERE chapter_id = chapters.id AND scroll_position >= 0.9) as is_read
+                     FROM chapters
+                     WHERE novel_id = ?
+                     ORDER BY chapter_order ASC \
+                     """
     chapters = [
         dict(row)
         for row in app.state.db.execute(chapters_query, (novel_id,)).fetchall()
     ]
 
-    # Tags
     tags_query = """
-    SELECT t.name FROM tags t
-    JOIN novel_tags nt ON t.id = nt.tag_id
-    WHERE nt.novel_id = ?
-    """
+                 SELECT t.name FROM tags t
+                                        JOIN novel_tags nt ON t.id = nt.tag_id
+                 WHERE nt.novel_id = ? \
+                 """
     tags = [
         row["name"] for row in app.state.db.execute(tags_query, (novel_id,)).fetchall()
     ]
@@ -176,13 +207,11 @@ async def get_chapter(chapter_id: int):
     content = row["html_content"] or row["plain_content"] or ""
     content_type = "html" if row["html_content"] else "plain"
 
-    # Strip HTML for word count if it's HTML
     import re
 
     clean_text = re.sub(r"<[^>]*>", "", content) if content_type == "html" else content
     word_count = len(clean_text.split())
 
-    # Prev/Next
     prev_query = "SELECT id FROM chapters WHERE novel_id = ? AND chapter_order < ? ORDER BY chapter_order DESC LIMIT 1"
     next_query = "SELECT id FROM chapters WHERE novel_id = ? AND chapter_order > ? ORDER BY chapter_order ASC LIMIT 1"
 
@@ -223,14 +252,12 @@ async def get_cover(novel_id: int):
 async def search(q: str):
     q_param = f"%{q}%"
 
-    # Search novels
     novels_query = "SELECT * FROM novels WHERE title LIKE ? OR author LIKE ? LIMIT 20"
     novels = [
         dict(row)
         for row in app.state.db.execute(novels_query, (q_param, q_param)).fetchall()
     ]
 
-    # Search chapters
     chapters_query = "SELECT * FROM chapters WHERE chapter_title LIKE ? LIMIT 20"
     chapters = [
         dict(row) for row in app.state.db.execute(chapters_query, (q_param,)).fetchall()
@@ -248,12 +275,12 @@ async def get_all_progress():
 @app.post("/api/progress")
 async def update_progress(progress: ProgressUpdate):
     query = """
-    INSERT INTO reading_progress (novel_id, chapter_id, scroll_position, read_at)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(novel_id, chapter_id) DO UPDATE SET
-        scroll_position = excluded.scroll_position,
-        read_at = excluded.read_at
-    """
+            INSERT INTO reading_progress (novel_id, chapter_id, scroll_position, read_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(novel_id, chapter_id) DO UPDATE SET
+                                                            scroll_position = excluded.scroll_position,
+                                                            read_at = excluded.read_at \
+            """
     app.state.db.execute(
         query, (progress.novel_id, progress.chapter_id, progress.scroll_position)
     )
@@ -264,37 +291,36 @@ async def update_progress(progress: ProgressUpdate):
 @app.get("/api/bookmarks")
 async def get_bookmarks():
     query = """
-    SELECT b.*, c.chapter_title, n.title as novel_title
-    FROM bookmarks b
-    JOIN chapters c ON b.chapter_id = c.id
-    JOIN novels n ON b.novel_id = n.id
-    ORDER BY b.created_at DESC
-    """
+            SELECT b.*, c.chapter_title, n.title as novel_title
+            FROM bookmarks b
+                     JOIN chapters c ON b.chapter_id = c.id
+                     JOIN novels n ON b.novel_id = n.id
+            ORDER BY b.created_at DESC \
+            """
     return [dict(row) for row in app.state.db.execute(query).fetchall()]
 
 
 @app.post("/api/bookmarks")
 async def create_bookmark(bm: BookmarkCreate):
     query = """
-    INSERT INTO bookmarks (chapter_id, novel_id, label, scroll_position)
-    VALUES (?, ?, ?, ?)
-    """
+            INSERT INTO bookmarks (chapter_id, novel_id, label, scroll_position)
+            VALUES (?, ?, ?, ?) \
+            """
     cursor = app.state.db.execute(
         query, (bm.chapter_id, bm.novel_id, bm.label, bm.scroll_position)
     )
     app.state.db.commit()
     new_id = cursor.lastrowid
 
-    # Return with joined info
     return dict(
         app.state.db.execute(
             """
-        SELECT b.*, c.chapter_title, n.title as novel_title
-        FROM bookmarks b
-        JOIN chapters c ON b.chapter_id = c.id
-        JOIN novels n ON b.novel_id = n.id
-        WHERE b.id = ?
-    """,
+            SELECT b.*, c.chapter_title, n.title as novel_title
+            FROM bookmarks b
+                     JOIN chapters c ON b.chapter_id = c.id
+                     JOIN novels n ON b.novel_id = n.id
+            WHERE b.id = ?
+            """,
             (new_id,),
         ).fetchone()
     )
@@ -302,7 +328,6 @@ async def create_bookmark(bm: BookmarkCreate):
 
 @app.delete("/api/bookmarks/{bookmark_id}")
 async def delete_bookmark(bookmark_id: int):
-    # Check if exists
     row = app.state.db.execute(
         "SELECT id FROM bookmarks WHERE id = ?", (bookmark_id,)
     ).fetchone()
@@ -326,12 +351,12 @@ async def get_note(chapter_id: int):
 @app.post("/api/notes")
 async def upsert_note(note: NoteUpdate):
     query = """
-    INSERT INTO notes (chapter_id, content, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(chapter_id) DO UPDATE SET
-        content = excluded.content,
-        updated_at = excluded.updated_at
-    """
+            INSERT INTO notes (chapter_id, content, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chapter_id) DO UPDATE SET
+                                                  content = excluded.content,
+                                                  updated_at = excluded.updated_at \
+            """
     app.state.db.execute(query, (note.chapter_id, note.content))
     app.state.db.commit()
     return {"status": "ok"}
@@ -342,44 +367,49 @@ async def upsert_note(note: NoteUpdate):
 
 def run_background_fetch(novel_id: int, mode: str):
     """
-    Background worker for fetching or updating chapters.
-    mode: 'fetch' or 'update'
+    Background worker for fetching or updating chapters, triggered from the reader UI.
+
+    Parameters:
+        novel_id (int): DB id of the novel to fetch/update.
+        mode (str): 'fetch' (first download) or 'update' (check for new chapters).
+
+    Called by: trigger_fetch_chapters(), trigger_update_chapters()
+    Depends on: ScraperService, CoverManager, NovelRepository
     """
     from core import DatabaseManager, NovelRepository, NetworkClient
     from services import BrowserService, CoverManager, ScraperService
 
-    # Instantiate the full stack as in main.py
+    log = _get_debug_logger()
+
     db_manager = DatabaseManager()
     repository = NovelRepository(db_manager)
     network_client = NetworkClient()
     browser_service = BrowserService()
-    cover_manager = CoverManager(network_client, repository, browser_service)
+    # FIX: CoverManager takes 2 args (network, repo) — browser_service removed
+    cover_manager = CoverManager(network_client, repository)
     scraper = ScraperService(network_client, browser_service, repository, cover_manager)
 
     try:
-        # 1. Refresh Metadata
+        log.info(f"[BG] Starting {mode} for novel {novel_id}")
+
         success = scraper.refresh_metadata(novel_id)
         if not success:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                f"Metadata refresh failed for novel {novel_id}, proceeding anyway"
+            log.warning(
+                f"[BG] Metadata refresh failed for novel {novel_id}, proceeding anyway"
             )
 
-        # 2. Fetch Chapters
-        print(f"[BG] Fetching chapter content for novel {novel_id}")
+        log.info(f"[BG] Fetching chapter content for novel {novel_id}")
         scraper.fetch_chapters(novel_id)
 
-        # Update content_status to 'full'
         repository.update_content_status(novel_id, "full")
 
         if mode == "update":
             repository.update_novel_timestamp(novel_id)
 
-        print(f"[BG] Completed {mode} for novel {novel_id}")
+        log.info(f"[BG] Completed {mode} for novel {novel_id}")
 
     except Exception as e:
-        print(f"[BG] Error during {mode} for novel {novel_id}: {e}")
+        log.error(f"[BG] Error during {mode} for novel {novel_id}: {e}", exc_info=True)
 
 
 @app.post("/api/novels/{novel_id}/fetch-chapters")
@@ -400,7 +430,6 @@ async def trigger_update_chapters(novel_id: int):
 
 @app.get("/api/novels/{novel_id}/fetch-status")
 async def get_fetch_status(novel_id: int):
-    # Check if novel exists
     novel = app.state.db.execute(
         "SELECT content_status FROM novels WHERE id = ?", (novel_id,)
     ).fetchone()

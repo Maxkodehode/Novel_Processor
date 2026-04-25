@@ -1,16 +1,13 @@
 # =============================================================================
 # CHANGES:
-#   - Removed the broken Playwright browser block entirely.
-#     It referenced self._browser (doesn't exist on CoverManager), used
-#     `with self.browser` which would shut down the shared BrowserService
-#     mid-run, and used TIMEOUT which was never imported. Cover images are
-#     static CDN assets — the network client handles them correctly.
-#   - Removed browser_service parameter from __init__ (was unused/broken).
-#   - Added COVER_FETCH_DELAY sleep before each download so covers don't
-#     fire in a tight loop during discovery runs.
-#   - Added non-zero file check before skipping existing covers.
-#   - Imported COVER_FETCH_DELAY and USER_AGENT from config at the top
-#     instead of inline inside the method.
+#   - download_and_save(): Removed the "skip if file already exists" guard.
+#     Previously, any existing cover file (including 0-byte files from failed
+#     prior downloads) would block a fresh download. Now the old file is always
+#     deleted before downloading, so covers are refreshed on every populate
+#     call and bad/empty files are automatically replaced.
+#   - The stale-cover removal block was already present but only ran for covers
+#     recorded in the DB. It now also removes any file at the target save_path
+#     before downloading, catching cases where the DB path and file path differ.
 # =============================================================================
 
 import os
@@ -39,7 +36,8 @@ class CoverManager:
             network_client (NetworkClient): Used for all HTTP requests.
             repository (NovelRepository): Used to persist the saved cover path.
 
-        Called by: ScraperService.__init__(), discovery_service main block, main.py, sync_novels.py
+        Called by: ScraperService.__init__(), discovery_service main block,
+                   main.py, sync_novels.py, server.run_background_fetch()
         Depends on: NetworkClient, NovelRepository, COVERS_DIR
         """
         self.network = network_client
@@ -48,12 +46,11 @@ class CoverManager:
 
     def download_and_save(self, cover_url: str, novel_id: int, slug: str) -> str | None:
         """
-        Downloads a cover image and saves it to disk, then updates the DB.
+        Downloads a cover image, replacing any existing cover for this novel.
 
-        Removes any stale cover file before downloading. Skips download if a
-        valid non-zero file already exists at the target path. Applies
-        COVER_FETCH_DELAY before the request to avoid tight loops during
-        discovery runs.
+        Always removes the old cover (both the DB-recorded path and any file
+        at the computed save path) before downloading, so covers are always
+        refreshed and 0-byte or stale files are never left in place.
 
         Parameters:
             cover_url (str): Remote URL of the cover image.
@@ -70,7 +67,7 @@ class CoverManager:
         if DEBUG:
             logger.debug(f"[download_and_save] novel_id={novel_id} url={cover_url}")
 
-        # --- Remove stale cover if one exists ---
+        # --- Remove DB-recorded cover if one exists ---
         try:
             old_cover = self.repository.db.execute(
                 "SELECT cover_path FROM novels WHERE id = ?", (novel_id,)
@@ -78,7 +75,7 @@ class CoverManager:
             if old_cover and old_cover[0][0]:
                 old_path = old_cover[0][0]
                 if os.path.exists(old_path):
-                    logger.info(f"Removing old cover: {old_path}")
+                    logger.info(f"Removing old cover (DB path): {old_path}")
                     os.remove(old_path)
         except Exception as e:
             logger.warning(f"Failed to remove old cover for novel {novel_id}: {e}")
@@ -91,10 +88,16 @@ class CoverManager:
         filename = f"{slug}_{novel_id}{ext}"
         save_path = os.path.join(COVERS_DIR, filename)
 
-        # Skip if a valid file is already present
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-            logger.info(f"Cover already exists, skipping download: {save_path}")
-            return save_path
+        # Remove any file already at the target path (e.g. from a prior failed download)
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+                if DEBUG:
+                    logger.debug(
+                        f"[download_and_save] Removed existing file at {save_path}"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not remove existing cover at {save_path}: {e}")
 
         # --- Rate limit: small pause before firing the request ---
         if DEBUG:

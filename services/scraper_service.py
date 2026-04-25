@@ -1,22 +1,28 @@
 # =============================================================================
 # CHANGES:
-#   - fetch_chapters(): Added jitter to the inter-chapter sleep using the new
-#     FETCH_DELAY_JITTER constant. Sleep is now random.uniform(FETCH_DELAY,
-#     FETCH_DELAY + FETCH_DELAY_JITTER) instead of a fixed FETCH_DELAY.
-#     This prevents perfectly regular request intervals that are easy to
-#     fingerprint and block.
+#   - scrape_novel(): Updated all browser.get_page_content() calls to pass
+#     keep_page_open=True only for ScribbleHub (which needs the live page for
+#     JS evaluation). All other browser fallbacks pass keep_page_open=False so
+#     the page is closed immediately after HTML is captured.
+#   - scrape_novel(): ScribbleHub finally block now explicitly closes pw_page
+#     since keep_page_open=True means the caller owns the lifecycle.
+#   - scrape_novel(): Removed ctx.close() calls — context is now persistent and
+#     lives on BrowserService. Closing it here would break subsequent requests.
+#   - All other methods unchanged.
 # =============================================================================
 
+import hashlib
 import logging
 import os
-import time
 import random
-import hashlib
+import time
+
 from bs4 import BeautifulSoup
+
 from adapters import get_adapter
-from core.network import NetworkClient
+from core.config import FETCH_DELAY, FETCH_DELAY_JITTER, FETCH_MAX_RETRIES, TIMEOUT
 from core.database import NovelRepository
-from core.config import FETCH_DELAY, FETCH_DELAY_JITTER, TIMEOUT, FETCH_MAX_RETRIES
+from core.network import NetworkClient
 from core.run_logger import RunLogger
 from services import BrowserService, CoverManager
 from utils import slugify
@@ -45,6 +51,13 @@ class ScraperService:
         """
         Fetches and parses a novel landing page.
 
+        For ScribbleHub, always uses Playwright with keep_page_open=True so the
+        adapter can call JS functions on the live page. The page is explicitly
+        closed in a finally block here after the adapter is done with it.
+        For all other sites, tries fast network fetch first with Playwright as
+        fallback. Playwright fallback uses keep_page_open=False so the page is
+        closed inside get_page_content() immediately after HTML capture.
+
         Parameters:
             url (str): The novel's landing page URL.
             use_local (str): Path to a local HTML file to use instead of fetching.
@@ -53,7 +66,7 @@ class ScraperService:
         Returns:
             dict | None: Parsed novel data, or None on failure.
 
-        Called by: main.py, discovery_service.py, scraper_service.refresh_metadata
+        Called by: main.py, discovery_service.py, refresh_metadata()
         Depends on: get_adapter(), NetworkClient.get(), BrowserService.get_page_content()
         """
         from adapters.scribblehub import ScribbleHubAdapter
@@ -61,60 +74,86 @@ class ScraperService:
         adapter = get_adapter(url)
         logger.info(f"Using adapter: {type(adapter).__name__}")
         if DEBUG:
-            logger.debug(f"[scrape_novel] url={url}, use_local={use_local}")
+            logger.debug(f"[scrape_novel] url={url} use_local={use_local}")
 
-        html = None
+        # --- Local file mode (dev/debug) ---
         if use_local and os.path.exists(use_local):
             with open(use_local, "r", encoding="utf-8") as f:
                 html = f.read()
+            soup = BeautifulSoup(html, "html.parser")
+            return adapter.parse(soup, url)
 
-        if not html and isinstance(adapter, ScribbleHubAdapter):
-            logger.info(f"Forcing Playwright for ScribbleHub: {url}")
-            html, pw_page = self.browser.get_page_content(url)
+        # --- ScribbleHub: always Playwright, keep page open for JS evaluation ---
+        if isinstance(adapter, ScribbleHubAdapter):
+            logger.info(f"[SH] Forcing Playwright for ScribbleHub: {url}")
+            html, pw_page = self.browser.get_page_content(url, keep_page_open=True)
             adapter._pw_page = pw_page
             try:
                 soup = BeautifulSoup(html, "html.parser")
                 data = adapter.parse(soup, url)
                 return data
+            except Exception as e:
+                logger.error(f"Failed to parse ScribbleHub novel {url}: {e}")
+                return None
             finally:
                 adapter._pw_page = None
+                # We own this page — close it now that the adapter is done
+                if pw_page:
+                    try:
+                        pw_page.close()
+                    except Exception:
+                        pass
 
+        # --- All other sites: try fast network fetch first ---
+        html = None
+
+        logger.info(f"Attempting fast fetch: {url}")
+        try:
+            response = self.network.get(url)
+            if response.status_code == 200:
+                html = response.text
+            else:
+                logger.warning(
+                    f"Fast fetch returned HTTP {response.status_code}, trying browser..."
+                )
+        except Exception as e:
+            logger.warning(f"Fast fetch failed: {e}. Trying browser...")
+
+        # --- Playwright fallback for non-ScribbleHub sites ---
         if not html:
-            logger.info(f"Attempting fast fetch: {url}")
             try:
-                response = self.network.get(url)
-                if response.status_code == 200:
-                    html = response.text
+                # keep_page_open=False — we only need the HTML, page closes inside
+                html, _ = self.browser.get_page_content(url, keep_page_open=False)
             except Exception as e:
-                logger.warning(f"Fast fetch failed: {e}. Falling back to Browser...")
+                logger.error(f"Browser fetch also failed for {url}: {e}")
+                return None
 
         if not html:
-            html, pw_page = self.browser.get_page_content(url)
-            adapter._pw_page = pw_page
-            if save_html:
-                with open(save_html, "w", encoding="utf-8") as f:
-                    f.write(html)
-                logger.info(f"Saved raw HTML to: {save_html}")
-
-        if not html:
-            logger.error(f"Failed to get content for {url}")
+            logger.error(f"Failed to get any content for {url}")
             return None
+
+        if save_html:
+            with open(save_html, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info(f"Saved raw HTML to: {save_html}")
 
         try:
             soup = BeautifulSoup(html, "html.parser")
-            data = adapter.parse(soup, url)
-            return data
-        finally:
-            adapter._pw_page = None
+            return adapter.parse(soup, url)
+        except Exception as e:
+            logger.error(f"Failed to parse novel {url}: {e}")
+            return None
 
     def populate_novel(self, data: dict, metadata_only: bool = False) -> int | None:
         """
         Inserts or updates a novel and its chapters/tags in the database.
 
         Parameters:
-            data (dict): Parsed novel data from a scrape_novel() call.
-            metadata_only (bool): If True, skips chapter upsert and sets
-                                  content_status to 'metadata'.
+            data (dict): Parsed novel data from scrape_novel().
+            metadata_only (bool): If True, skips chapter upsert and marks
+                                  content_status as 'metadata'. Used by
+                                  discovery runs where chapter content is not
+                                  yet downloaded.
 
         Returns:
             int | None: The novel's database ID, or None on failure.
@@ -124,6 +163,7 @@ class ScraperService:
         """
         slug = data.get("slug") or slugify(data["title"])
         novel_id = self.repository.upsert_novel(data, slug)
+
         if novel_id:
             if not metadata_only:
                 self.repository.upsert_chapters(novel_id, data.get("chapters", []))
@@ -149,7 +189,7 @@ class ScraperService:
         Returns:
             bool: True if refresh succeeded, False otherwise.
 
-        Called by: (reader API, manual use)
+        Called by: reader API, server.run_background_fetch()
         Depends on: scrape_novel(), populate_novel()
         """
         rows = self.repository.db.execute(
@@ -187,7 +227,7 @@ class ScraperService:
         Returns:
             None
 
-        Called by: main.py, sync_novels.py
+        Called by: main.py, sync_novels.py, backfill_chapters.py
         Depends on: NovelRepository.get_pending_chapters(),
                     NovelRepository.update_chapter_content(),
                     get_adapter(), NetworkClient.get(), RunLogger
@@ -237,38 +277,32 @@ class ScraperService:
                         word_count = len(content_text.split())
                         log.ok(ch_id, title, word_count, elapsed)
                         logger.info(f"Saved '{title}'.")
-
                         success = True
-
-                        del soup
-                        del response
-                        del content_data
                         break
 
                     except Exception as e:
                         error_msg = str(e)
                         if attempt <= FETCH_MAX_RETRIES:
-                            logger.warning(f"Retry {attempt} for {title}: {error_msg}")
-                            log.retry(ch_id, title, attempt, error_msg)
                             backoff = 5 if attempt == 1 else 15
+                            logger.warning(
+                                f"Retry {attempt} for '{title}': {error_msg} "
+                                f"— waiting {backoff}s"
+                            )
+                            log.retry(ch_id, title, attempt, error_msg)
                             time.sleep(backoff)
                         else:
                             logger.error(
-                                f"Failed to fetch {title} after {attempt} attempts: {error_msg}"
+                                f"Failed to fetch '{title}' after {attempt} attempts: "
+                                f"{error_msg}"
                             )
                             log.fail(ch_id, title, error_msg)
 
-                if not success:
-                    pass
-
-                # --- FIX: Jittered sleep between chapters ---
-                # random.uniform adds up to FETCH_DELAY_JITTER extra seconds so
-                # the interval is never a perfectly predictable fixed value.
+                # Jittered sleep between chapters — never a predictable fixed interval
                 jittered_delay = random.uniform(
                     FETCH_DELAY, FETCH_DELAY + FETCH_DELAY_JITTER
                 )
                 if DEBUG:
                     logger.debug(
-                        f"[fetch_chapters] sleeping {jittered_delay:.1f}s before next chapter"
+                        f"[fetch_chapters] sleeping {jittered_delay:.1f}s before next"
                     )
                 time.sleep(jittered_delay)

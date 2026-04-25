@@ -213,13 +213,20 @@ header {
     opacity: 1;
 }
 
-/* Reader View */
+/* ─── Reader View ────────────────────────────────────────────────────────── */
 #reader-view {
     padding: 0;
+    display: flex;
+    flex-direction: column;
 }
 
+/*
+ * Reader bars are now static (in page flow) rather than fixed.
+ * They sit at the top and bottom of the page, not the viewport,
+ * so they don't obscure content while scrolling.
+ */
 .reader-bar {
-    position: fixed;
+    position: static;
     width: 100%;
     background: var(--bg-secondary);
     display: flex;
@@ -231,17 +238,17 @@ header {
 }
 
 .reader-bar.top {
-    top: 0;
     height: 50px;
     justify-content: space-between;
     border-bottom-width: 1px;
 }
 
 .reader-bar.bottom {
-    bottom: 0;
     height: 60px;
     justify-content: space-between;
     border-top-width: 1px;
+    /* Push to end of flex column so it sits after all chapter sections */
+    margin-top: auto;
 }
 
 .reader-bar .center {
@@ -252,19 +259,51 @@ header {
     padding: 0 20px;
 }
 
+/*
+ * Reading column: no margin-top/bottom needed since bars are no longer fixed.
+ * Padding kept for comfortable line length.
+ */
 #reading-column {
     max-width: var(--content-width);
-    margin: 70px auto 100px;
-    padding: 0 20px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 40px 20px;
 }
 
-#chapter-content p {
+/*
+ * Each chapter is its own section inside #reading-column.
+ * A visible divider separates chapters in infinite-scroll mode.
+ */
+.chapter-section {
+    margin-bottom: 60px;
+}
+
+.chapter-section + .chapter-section {
+    border-top: 2px solid var(--bg-secondary);
+    padding-top: 40px;
+}
+
+.chapter-section-title {
+    font-size: 1.4rem;
+    font-weight: bold;
+    margin-bottom: 24px;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.chapter-section p {
     margin-bottom: var(--paragraph-spacing);
     font-size: var(--font-size);
     line-height: var(--line-height);
 }
 
-/* Panels */
+/* Sentinel element used by IntersectionObserver to detect chapter boundaries */
+.chapter-sentinel {
+    height: 1px;
+    margin: 0;
+}
+
+/* ─── Panels ─────────────────────────────────────────────────────────────── */
 .side-panel {
     position: fixed;
     top: 0;
@@ -333,7 +372,7 @@ header {
     cursor: pointer;
 }
 
-/* Modals */
+/* ─── Modals ─────────────────────────────────────────────────────────────── */
 .modal {
     position: fixed;
     top: 0;
@@ -406,7 +445,7 @@ button:hover {
     font-weight: bold;
 }
 
-/* Tri-state Tag Filter */
+/* ─── Tri-state Tag Filter ───────────────────────────────────────────────── */
 .tag-filter-section {
     max-width: 1200px;
     margin: 0 auto 20px;
@@ -460,4 +499,17 @@ button:hover {
 
 .primary-btn:hover {
     filter: brightness(1.1);
+}
+
+/* Progress bar at bottom of reader (inside bottom bar) */
+.progress-container {
+    flex: 1;
+    margin: 0 20px;
+}
+
+#reader-progress-bar {
+    height: 4px;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s;
 }
