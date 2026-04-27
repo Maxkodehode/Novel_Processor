@@ -2,11 +2,16 @@
 # CHANGES:
 #   - run_background_fetch(): Fixed CoverManager instantiation — was passing
 #     3 args (including browser_service) but CoverManager.__init__ only takes 2.
-#   - Added DEBUG flag and file-based logging for background fetch operations.
-#     When DEBUG=True, all background fetch output goes to ~/Desktop/reader_debug.log
-#     so it can be easily retrieved and shared.
-#   - All other endpoints unchanged — content_status, reading_progress,
-#     bookmarks, and notes are all intentional features.
+#   - run_background_fetch(): BrowserService is now started and stopped
+#     explicitly via a try/finally block. Previously start() was never called
+#     and stop() was never called, leaking the Playwright browser process.
+#   - run_background_fetch(): update_content_status('full') moved into a
+#     finally block so it always fires even if fetch_chapters() raises or
+#     the browser crashes. Without this, the reader UI polls forever because
+#     content_status never reaches 'full'.
+#   - Logging: background fetch errors always write to ~/Desktop/reader_debug.log
+#     regardless of the DEBUG flag, so silent crashes are always visible.
+#     DEBUG=True additionally logs info/debug messages.
 # =============================================================================
 
 import logging
@@ -33,8 +38,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 def _get_debug_logger():
     """
-    Returns a file-based logger for background fetch debug output.
-    Writes to ~/Desktop/reader_debug.log when DEBUG=True.
+    Returns a file-based logger for background fetch output.
+    Always writes ERROR and above to ~/Desktop/reader_debug.log so silent
+    crashes in the background thread are never invisible.
+    When DEBUG=True, also writes INFO and DEBUG messages.
 
     Returns:
         logging.Logger: Configured logger instance.
@@ -49,13 +56,21 @@ def _get_debug_logger():
             logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         )
         log.addHandler(handler)
-        log.setLevel(logging.DEBUG if DEBUG else logging.INFO)
+        # Always capture errors; DEBUG flag controls whether info is also written
+        log.setLevel(logging.DEBUG if DEBUG else logging.ERROR)
     return log
 
 
 # --- Database ---
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Convert DB_PATH to a Path object
+    db_file = Path(DB_PATH)
+
+    # If it's a relative path (like "novels.db"), resolve it relative to PROJECT_ROOT
+    if not db_file.is_absolute():
+        db_file = PROJECT_ROOT / db_file
+
+    conn = sqlite3.connect(db_file, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -369,12 +384,17 @@ def run_background_fetch(novel_id: int, mode: str):
     """
     Background worker for fetching or updating chapters, triggered from the reader UI.
 
+    BrowserService is started and stopped explicitly here so the Playwright
+    process is properly cleaned up after each background job. update_content_status
+    is in a finally block so the UI polling always terminates even if the fetch
+    crashes partway through.
+
     Parameters:
         novel_id (int): DB id of the novel to fetch/update.
         mode (str): 'fetch' (first download) or 'update' (check for new chapters).
 
     Called by: trigger_fetch_chapters(), trigger_update_chapters()
-    Depends on: ScraperService, CoverManager, NovelRepository
+    Depends on: ScraperService, CoverManager, NovelRepository, BrowserService
     """
     from core import DatabaseManager, NovelRepository, NetworkClient
     from services import BrowserService, CoverManager, ScraperService
@@ -385,31 +405,42 @@ def run_background_fetch(novel_id: int, mode: str):
     repository = NovelRepository(db_manager)
     network_client = NetworkClient()
     browser_service = BrowserService()
-    # FIX: CoverManager takes 2 args (network, repo) — browser_service removed
     cover_manager = CoverManager(network_client, repository)
     scraper = ScraperService(network_client, browser_service, repository, cover_manager)
 
     try:
-        log.info(f"[BG] Starting {mode} for novel {novel_id}")
+        log.error(f"[BG] Starting {mode} for novel {novel_id}")  # always visible
+        browser_service.start()
 
         success = scraper.refresh_metadata(novel_id)
         if not success:
-            log.warning(
+            log.error(
                 f"[BG] Metadata refresh failed for novel {novel_id}, proceeding anyway"
             )
 
-        log.info(f"[BG] Fetching chapter content for novel {novel_id}")
+        log.error(f"[BG] Fetching chapter content for novel {novel_id}")
         scraper.fetch_chapters(novel_id)
-
-        repository.update_content_status(novel_id, "full")
 
         if mode == "update":
             repository.update_novel_timestamp(novel_id)
 
-        log.info(f"[BG] Completed {mode} for novel {novel_id}")
+        log.error(f"[BG] Completed {mode} for novel {novel_id}")
 
     except Exception as e:
         log.error(f"[BG] Error during {mode} for novel {novel_id}: {e}", exc_info=True)
+
+    finally:
+        # Always mark as full so the UI stops polling, even if fetch was partial.
+        # Chapters that were downloaded are still readable; none are lost.
+        try:
+            repository.update_content_status(novel_id, "full")
+        except Exception as e:
+            log.error(f"[BG] Failed to update content_status for novel {novel_id}: {e}")
+        # Always shut down the browser to avoid leaked Playwright processes
+        try:
+            browser_service.stop()
+        except Exception as e:
+            log.error(f"[BG] Failed to stop browser for novel {novel_id}: {e}")
 
 
 @app.post("/api/novels/{novel_id}/fetch-chapters")
@@ -453,4 +484,9 @@ async def get_fetch_status(novel_id: int):
 
 
 # --- Static Files ---
-app.mount("/", StaticFiles(directory="reader/static", html=True), name="static")
+# Use the absolute path derived from the project root
+app.mount(
+    "/",
+    StaticFiles(directory=PROJECT_ROOT / "reader" / "static", html=True),
+    name="static",
+)

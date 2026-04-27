@@ -22,14 +22,21 @@
 # =============================================================================
 
 import logging
+import sys
+
+print(f"DEBUG: Python executable: {sys.executable}")
+print(f"DEBUG: sys.path: {sys.path}")
 from playwright.sync_api import sync_playwright
 
+# In browser_service.py
+# In browser_service.py
 try:
     from playwright_stealth import stealth_sync
 
     _STEALTH_AVAILABLE = True
-except ImportError:
+except Exception as e:
     _STEALTH_AVAILABLE = False
+    print(f"DEBUG: Stealth import failed: {e}")
 
 from core.config import USER_AGENT, TIMEOUT
 

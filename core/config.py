@@ -12,7 +12,9 @@
 import os
 
 # Database
-DB_PATH = os.getenv("DB_PATH", "novels.db")
+# Force absolute path
+PROJECT_ROOT = "/home/eikichi/Dev/Novel_Processor"
+DB_PATH = os.path.join(PROJECT_ROOT, "novels.db")
 
 # Network
 USER_AGENT = (
