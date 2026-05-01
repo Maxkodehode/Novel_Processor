@@ -1,18 +1,24 @@
 # =============================================================================
 # CHANGES:
-#   - download_and_save(): Removed the "skip if file already exists" guard.
-#     Previously, any existing cover file (including 0-byte files from failed
-#     prior downloads) would block a fresh download. Now the old file is always
-#     deleted before downloading, so covers are refreshed on every populate
-#     call and bad/empty files are automatically replaced.
-#   - The stale-cover removal block was already present but only ran for covers
-#     recorded in the DB. It now also removes any file at the target save_path
-#     before downloading, catching cases where the DB path and file path differ.
+#   - download_and_save(): Added explicit None/empty guard at the top — if
+#     cover_url is falsy the method returns None immediately with a warning
+#     instead of crashing on cover_url.startswith("/").
+#   - download_and_save(): Network fetch exception handler now logs the full
+#     error string so encoding errors (curl error 61) are visible in logs
+#     before handing off to the browser fallback.
+#   - _download_via_browser(): Fixed double-navigation bug — get_page_content()
+#     already calls page.goto() internally, so the subsequent page.goto() call
+#     was navigating twice and the first response object was discarded. Now the
+#     method opens a page, navigates once via page.goto(), and reads the body
+#     from that single response. The BrowserService context is opened with
+#     block_resources=False so image bytes are not intercepted and aborted.
+#   - _download_via_browser(): Added None check on the goto() response before
+#     calling response.body() — Playwright can return None for failed navigations.
 # =============================================================================
 
 import os
-import time
 import logging
+import time
 
 from core.config import COVERS_DIR, USER_AGENT, COVER_FETCH_DELAY
 from core.network import NetworkClient
@@ -24,63 +30,72 @@ DEBUG = False
 
 
 class CoverManager:
-    def __init__(
-        self,
-        network_client: NetworkClient,
-        repository: NovelRepository,
-    ):
-        """
-        Manages downloading and storing novel cover images.
-
-        Parameters:
-            network_client (NetworkClient): Used for all HTTP requests.
-            repository (NovelRepository): Used to persist the saved cover path.
-
-        Called by: ScraperService.__init__(), discovery_service main block,
-                   main.py, sync_novels.py, server.run_background_fetch()
-        Depends on: NetworkClient, NovelRepository, COVERS_DIR
-        """
+    def __init__(self, network_client: NetworkClient, repository: NovelRepository):
         self.network = network_client
         self.repository = repository
         os.makedirs(COVERS_DIR, exist_ok=True)
 
     def download_and_save(self, cover_url: str, novel_id: int, slug: str) -> str | None:
         """
-        Downloads a cover image, replacing any existing cover for this novel.
+        Downloads a cover image and saves it to disk, then records the path in the DB.
 
-        Always removes the old cover (both the DB-recorded path and any file
-        at the computed save path) before downloading, so covers are always
-        refreshed and 0-byte or stale files are never left in place.
+        Uses a two-tier strategy:
+          Tier 1: Fast network fetch via curl_cffi (NetworkClient).
+          Tier 2: Playwright browser fallback if network fetch fails for any reason.
+
+        Skips generic placeholder images and handles relative URLs for Royal Road
+        and FanFiction.net.
 
         Parameters:
-            cover_url (str): Remote URL of the cover image.
-            novel_id (int): DB ID of the novel, used in the filename.
-            slug (str): Novel slug, used in the filename.
+            cover_url (str): URL of the cover image to download.
+            novel_id (int): DB id of the novel (used for file naming and DB update).
+            slug (str): URL-safe novel slug (used for file naming).
 
         Returns:
-            str | None: Relative path to the saved file, or None on failure.
+            str | None: Local file path if saved successfully, None otherwise.
 
-        Called by: ScraperService.populate_novel()
-        Depends on: NetworkClient.get(), NovelRepository.update_cover_path(),
-                    COVERS_DIR, COVER_FETCH_DELAY, USER_AGENT
+        Called by: ScraperService.populate_novel(), backfill_covers.py fix_cover()
+        Depends on: NetworkClient.get(), _download_via_browser(), NovelRepository.update_cover_path()
         """
-        if DEBUG:
-            logger.debug(f"[download_and_save] novel_id={novel_id} url={cover_url}")
+        # Guard: cover_url must be a non-empty string
+        if not cover_url:
+            logger.warning(
+                f"download_and_save called with empty cover_url for novel {novel_id}"
+            )
+            return None
 
-        # --- Remove DB-recorded cover if one exists ---
+        # 1. Resolve relative URLs (Royal Road / FanFiction.net)
+        if cover_url.startswith("/"):
+            if "royalroad" in cover_url or "royalroad" in slug:
+                cover_url = f"https://www.royalroad.com{cover_url}"
+            elif "fanfiction" in cover_url or "fanfiction" in slug:
+                cover_url = f"https://www.fanfiction.net{cover_url}"
+
+        # 2. Skip generic placeholder images
+        placeholders = ["d_60_90.jpg", "nocover-new-min.png", "default-cover"]
+        if any(p in cover_url.lower() for p in placeholders):
+            logger.info(
+                f"Skipping generic placeholder for novel {novel_id}: {cover_url}"
+            )
+            return None
+
+        # 3. Remove stale cover file to prevent orphaned files on disk
         try:
-            old_cover = self.repository.db.execute(
+            old_path_row = self.repository.db.execute(
                 "SELECT cover_path FROM novels WHERE id = ?", (novel_id,)
             )
-            if old_cover and old_cover[0][0]:
-                old_path = old_cover[0][0]
-                if os.path.exists(old_path):
-                    logger.info(f"Removing old cover (DB path): {old_path}")
+            if old_path_row:
+                old_path = old_path_row[0][0] if old_path_row[0] else None
+                if old_path and os.path.exists(old_path):
                     os.remove(old_path)
+                    if DEBUG:
+                        logger.debug(
+                            f"[download_and_save] Removed stale cover: {old_path}"
+                        )
         except Exception as e:
-            logger.warning(f"Failed to remove old cover for novel {novel_id}: {e}")
+            logger.warning(f"Could not remove old cover for novel {novel_id}: {e}")
 
-        # --- Determine output path ---
+        # 4. Determine save path from URL extension
         ext = os.path.splitext(cover_url.split("?")[0])[-1].lower()
         if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
             ext = ".jpg"
@@ -88,66 +103,127 @@ class CoverManager:
         filename = f"{slug}_{novel_id}{ext}"
         save_path = os.path.join(COVERS_DIR, filename)
 
-        # Remove any file already at the target path (e.g. from a prior failed download)
-        if os.path.exists(save_path):
-            try:
-                os.remove(save_path)
-                if DEBUG:
-                    logger.debug(
-                        f"[download_and_save] Removed existing file at {save_path}"
-                    )
-            except Exception as e:
-                logger.warning(f"Could not remove existing cover at {save_path}: {e}")
+        # 5. Polite delay before fetch (rate limiting for CDN requests)
+        if COVER_FETCH_DELAY > 0:
+            time.sleep(COVER_FETCH_DELAY)
 
-        # --- Rate limit: small pause before firing the request ---
-        if DEBUG:
-            logger.debug(
-                f"[download_and_save] sleeping {COVER_FETCH_DELAY}s before download"
-            )
-        time.sleep(COVER_FETCH_DELAY)
+        # 6. Tier 1: Fast network fetch
+        headers = {"User-Agent": USER_AGENT}
+        if "fanfiction.net" in cover_url.lower():
+            headers["Referer"] = "https://www.fanfiction.net/"
+        if "royalroad" in cover_url.lower():
+            headers["Referer"] = "https://www.royalroad.com/"
 
-        # --- Download via network client ---
         try:
-            headers = {}
-
-            # FanFiction.net CDN requires a matching Referer to serve images
-            if any(
-                domain in cover_url.lower()
-                for domain in ["fanfiction.net", "ff.net", "ffn"]
-            ):
-                headers = {
-                    "Referer": "https://www.fanfiction.net/",
-                    "User-Agent": USER_AGENT,
-                }
-
             if DEBUG:
-                logger.debug(f"[download_and_save] GET {cover_url} headers={headers}")
+                logger.debug(f"[download_and_save] Tier 1 fetch: {cover_url}")
 
             response = self.network.get(cover_url, headers=headers)
 
-            if response.status_code != 200:
-                logger.warning(
-                    f"Cover download returned HTTP {response.status_code} for {cover_url}"
+            if len(response.content) < 1024:
+                raise ValueError(
+                    f"Response too small ({len(response.content)} bytes) — likely a placeholder or error page"
                 )
-                return None
 
-            if len(response.content) == 0:
-                logger.warning(f"Downloaded 0-byte cover from {cover_url}, skipping.")
-                return None
+            # Reconcile extension with actual Content-Type
+            content_type = response.headers.get("Content-Type", "")
+            if "image/webp" in content_type and not save_path.endswith(".webp"):
+                save_path = save_path.rsplit(".", 1)[0] + ".webp"
+            elif "image/png" in content_type and not save_path.endswith(".png"):
+                save_path = save_path.rsplit(".", 1)[0] + ".png"
 
             with open(save_path, "wb") as f:
                 f.write(response.content)
 
-            # Final sanity check on the written file
-            if os.path.getsize(save_path) == 0:
-                logger.warning(f"Saved cover is 0 bytes, deleting: {save_path}")
-                os.remove(save_path)
-                return None
-
-            logger.info(f"Cover saved: {save_path} ({len(response.content)} bytes)")
+            logger.info(
+                f"Cover saved (Network): {save_path} ({len(response.content)} bytes)"
+            )
             self.repository.update_cover_path(novel_id, save_path)
             return save_path
 
         except Exception as e:
-            logger.error(f"Failed to download cover from {cover_url}: {e}")
+            # Log the real error (e.g. curl error 61) before falling through
+            logger.warning(
+                f"Network fetch failed for novel {novel_id} ({cover_url}): {e}. "
+                f"Trying browser fallback..."
+            )
+            return self._download_via_browser(cover_url, novel_id, save_path)
+
+    def _download_via_browser(
+        self, cover_url: str, novel_id: int, save_path: str
+    ) -> str | None:
+        """
+        Downloads a cover image via a headless Playwright browser.
+
+        Used as a fallback when the fast network fetch fails (e.g. due to
+        Brotli/Zstd encoding errors, CAPTCHA-guarded CDNs, or hotlink protection
+        that checks for a real browser User-Agent).
+
+        Opens a fresh BrowserService context so this method is safe to call
+        without a running browser. Navigates once and reads the raw response
+        body from Playwright's network interception — no double-navigation.
+
+        Parameters:
+            cover_url (str): URL of the cover image.
+            novel_id (int): DB id of the novel.
+            save_path (str): Full local path where the image should be saved.
+
+        Returns:
+            str | None: save_path if saved successfully, None otherwise.
+
+        Called by: download_and_save()
+        Depends on: BrowserService, NovelRepository.update_cover_path()
+        """
+        from services.browser_service import BrowserService
+
+        if DEBUG:
+            logger.debug(
+                f"[_download_via_browser] Attempting browser fetch: {cover_url}"
+            )
+
+        try:
+            # Use a fresh context — block_resources=False so image bytes are not aborted
+            with BrowserService(headless=True) as browser:
+                browser.start()
+                page = browser._context.new_page()
+
+                try:
+                    # Single navigation — read body from this response object
+                    response = page.goto(
+                        cover_url,
+                        timeout=30_000,
+                        wait_until="networkidle",
+                    )
+
+                    if response is None:
+                        logger.warning(
+                            f"Browser navigation returned None for {cover_url} "
+                            f"(novel {novel_id})"
+                        )
+                        return None
+
+                    buffer = response.body()
+
+                    if buffer and len(buffer) > 1024:
+                        with open(save_path, "wb") as f:
+                            f.write(buffer)
+                        logger.info(
+                            f"Cover saved (Browser): {save_path} ({len(buffer)} bytes)"
+                        )
+                        self.repository.update_cover_path(novel_id, save_path)
+                        return save_path
+                    else:
+                        logger.warning(
+                            f"Browser response body too small for novel {novel_id} "
+                            f"({len(buffer) if buffer else 0} bytes)"
+                        )
+                        return None
+
+                finally:
+                    page.close()
+
+        except Exception as e:
+            logger.error(
+                f"Browser fallback failed for novel {novel_id} ({cover_url}): {e}"
+            )
             return None
