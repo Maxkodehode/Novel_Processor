@@ -1,16 +1,46 @@
+# =============================================================================
+# CHANGES:
+#   - parse(): Added WARNING log when window.chapters JSON is malformed or
+#     fails to parse. Previously the json.JSONDecodeError was silently caught
+#     and swallowed — the fallback to HTML table rows fired but nothing in the
+#     logs indicated the primary chapter source had failed.
+#   - Added module-level logger — royalroad.py previously had no logger.
+#   - Added DEBUG log when the HTML table row fallback is used so it is clear
+#     which source produced the chapter list.
+#   - All parsing logic unchanged.
+# =============================================================================
+
 import re
 import json
+import logging
 
 from bs4 import BeautifulSoup
 
 from .base import BaseAdapter
 from utils.text import slugify
 
+logger = logging.getLogger(__name__)
+
+DEBUG = False
+
 
 class RoyalRoadAdapter(BaseAdapter):
     HOSTS = ["royalroad.com"]
 
     def parse(self, soup: BeautifulSoup, url: str) -> dict:
+        """
+        Parses a Royal Road fiction page into a structured data dict.
+
+        Parameters:
+            soup (BeautifulSoup): Parsed HTML of the fiction landing page.
+            url (str): Canonical URL of the fiction.
+
+        Returns:
+            dict: Novel data including title, author, cover_url, chapters, etc.
+
+        Called by: ScraperService.scrape_novel()
+        Depends on: slugify(), json, re
+        """
         # --- Title & author ---
         title = self._text(soup.select_one("h1.font-white"))
         author_tag = soup.select_one("h4 a.font-white") or soup.select_one(
@@ -102,12 +132,24 @@ class RoyalRoadAdapter(BaseAdapter):
                                 "published": entry.get("date"),
                             }
                         )
-                except json.JSONDecodeError:
-                    pass
+                    if DEBUG:
+                        logger.debug(
+                            f"[parse] Loaded {len(chapters)} chapters from "
+                            f"window.chapters JSON"
+                        )
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"[parse] window.chapters JSON parse failed for {url}: {e}. "
+                        f"Falling back to HTML table row extraction."
+                    )
                 break
 
         # Fallback: visible table rows
         if not chapters:
+            if DEBUG:
+                logger.debug(
+                    f"[parse] Using HTML table row fallback for chapter list: {url}"
+                )
             for i, row in enumerate(soup.select("tr.chapter-row")):
                 link = row.select_one("td a[href]")
                 time_tag = row.select_one("time")
@@ -140,6 +182,18 @@ class RoyalRoadAdapter(BaseAdapter):
         }
 
     def parse_chapter_content(self, soup: BeautifulSoup) -> dict:
+        """
+        Extracts plain text and raw HTML from a Royal Road chapter page.
+
+        Parameters:
+            soup (BeautifulSoup): Parsed HTML of the chapter page.
+
+        Returns:
+            dict: {'plain_text': str, 'raw_html': str}
+
+        Called by: ScraperService.fetch_chapters()
+        Depends on: BeautifulSoup selector '.chapter-inner'
+        """
         content_tag = soup.select_one(".chapter-inner")
         return {
             "plain_text": content_tag.get_text(separator="\n", strip=True)

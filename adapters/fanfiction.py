@@ -1,9 +1,27 @@
+# =============================================================================
+# CHANGES:
+#   - parse(): Added logging for the cover URL thumbnail→full-size upgrade so
+#     it is visible when the regex fires (or silently doesn't). Logs both the
+#     original thumbnail URL and the upgraded URL at DEBUG level, and logs a
+#     WARNING if a cover src was found but the URL ends up empty after
+#     normalisation (which would mean no cover is downloaded).
+#   - parse(): Added module-level logger — fanfiction.py previously had no
+#     logger at all, so all cover diagnostics had to be inferred from
+#     cover_manager.py logs.
+#   - All parsing logic unchanged.
+# =============================================================================
+
 import re
+import logging
 
 from bs4 import BeautifulSoup
 
 from .base import BaseAdapter
 from utils.text import slugify
+
+logger = logging.getLogger(__name__)
+
+DEBUG = False
 
 
 class FanFictionAdapter(BaseAdapter):
@@ -36,6 +54,19 @@ class FanFictionAdapter(BaseAdapter):
     }
 
     def parse(self, soup: BeautifulSoup, url: str) -> dict:
+        """
+        Parses a FanFiction.net story page into a structured data dict.
+
+        Parameters:
+            soup (BeautifulSoup): Parsed HTML of the story landing page.
+            url (str): Canonical URL of the story.
+
+        Returns:
+            dict: Novel data including title, author, cover_url, chapters, etc.
+
+        Called by: ScraperService.scrape_novel()
+        Depends on: slugify(), re
+        """
         # --- Embedded JS metadata ---
         meta = {}
         for script in soup.find_all("script"):
@@ -54,6 +85,10 @@ class FanFictionAdapter(BaseAdapter):
         author_tag = profile.select_one("a.xcontrast_txt") if profile else None
         author = self._text(author_tag)
 
+        # --- Cover image ---
+        # FFN serves covers from CDN subdomains (ffnet.b-cdn.net, img.ffn.io, etc.)
+        # that require a Referer header pointing at fanfiction.net. The Referer
+        # injection is handled in cover_manager.py based on the stored URL.
         cover = soup.select_one("img.cimage")
         cover_url = None
         if cover:
@@ -65,10 +100,32 @@ class FanFictionAdapter(BaseAdapter):
             elif src.startswith("/"):
                 # Relative path — prepend FF.net domain
                 cover_url = "https://www.fanfiction.net" + src
+
             # Upgrade thumbnail size (/75/) to full resolution (/180/)
-            # Only do this for FF.net's /image/<id>/<size>/ pattern
+            # Only applies to FF.net's /image/<id>/<size>/ CDN pattern.
             if cover_url and re.search(r"/image/\d+/\d+/$", cover_url):
+                original = cover_url
                 cover_url = re.sub(r"/\d+/$", "/180/", cover_url)
+                if DEBUG:
+                    logger.debug(
+                        f"[parse] Cover URL upgraded: {original} → {cover_url}"
+                    )
+                else:
+                    logger.info(f"[parse] Cover URL upgraded to full size: {cover_url}")
+            elif cover_url:
+                if DEBUG:
+                    logger.debug(
+                        f"[parse] Cover URL kept as-is (no thumbnail pattern): {cover_url}"
+                    )
+
+            if not cover_url:
+                logger.warning(
+                    f"[parse] img.cimage found but cover_url is empty after "
+                    f"normalisation (src='{src}')"
+                )
+        else:
+            if DEBUG:
+                logger.debug("[parse] No img.cimage element found — no cover")
 
         syn = profile.select_one("div.xcontrast_txt") if profile else None
         synopsis = self._text(syn)
@@ -184,6 +241,18 @@ class FanFictionAdapter(BaseAdapter):
         }
 
     def parse_chapter_content(self, soup: BeautifulSoup) -> dict:
+        """
+        Extracts plain text and raw HTML from a FanFiction.net chapter page.
+
+        Parameters:
+            soup (BeautifulSoup): Parsed HTML of the chapter page.
+
+        Returns:
+            dict: {'plain_text': str, 'raw_html': str}
+
+        Called by: ScraperService.fetch_chapters()
+        Depends on: BeautifulSoup selector '#storytext'
+        """
         content_tag = soup.select_one("#storytext")
         return {
             "plain_text": content_tag.get_text(separator="\n", strip=True)

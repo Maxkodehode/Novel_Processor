@@ -1,24 +1,21 @@
 # =============================================================================
 # CHANGES:
-#   - parse(): The old logic only ran the Playwright block when last_page > 1,
-#     meaning novels with all chapters on one page (no pagination) never
-#     triggered any JS — so chapter links were never loaded from the DOM.
-#     ScribbleHub renders chapter <li> elements client-side regardless of
-#     page count, so Playwright is always needed.
-#   - parse(): Added Strategy 1 — call toc_fic_show_all() via pw.evaluate().
-#     This mirrors the "Show All Chapters" button. The site signals completion
-#     by adding 'isdisabled' to #menu_icon_fic. One JS call replaces the
-#     entire pagination loop for most novels.
-#   - parse(): Fixed Strategy 1 wait condition — 'isdisabled' is set at the
-#     START of loading, not the end, so it fired too early and only returned
-#     the initial 15 chapters. Now waits for li.toc_w count to match the
-#     known chapter_count badge, with a 60s timeout for large novels.
-#     Falls back to pagination if show_all yields fewer chapters than expected.
-#   - parse(): Kept the old pagination loop as Strategy 2 (fallback) in case
-#     toc_fic_show_all() fails, times out, or returns an incomplete list.
-#   - parse(): Playwright block now triggers whenever _pw_page is set,
-#     not only when last_page > 1.
-#   - _extract_chapters(): Unchanged — selector logic is correct.
+#   - parse(): Added a wait-for-readiness block before calling toc_fic_show_all().
+#     The page is now in "load" state (controlled by scraper_service passing
+#     wait_until="load" to get_page_content), but ScribbleHub's JS bundle can
+#     still be attaching globals at that point. We now wait for either
+#     #menu_icon_fic to exist in the DOM (the Show-All button container, only
+#     present after scripts run) or a 2000ms fallback timeout before evaluating,
+#     whichever comes first. This prevents the ReferenceError when evaluate()
+#     fires before the site's bundle has run.
+#   - parse(): Strategy 2 (pagination fallback) now also waits for the TOC
+#     container selector before attempting to read last_page from the DOM,
+#     so it does not silently return 0 chapters when show_all fails.
+#   - parse(): Improved failure logging — when toc_fic_show_all fails the log
+#     now distinguishes between "function not defined yet" (timing) vs other
+#     errors, making it easier to diagnose re-occurrences.
+#   - All other logic (90% threshold check, re-indexing, _extract_chapters)
+#     unchanged.
 # =============================================================================
 
 import re
@@ -48,6 +45,11 @@ class ScribbleHubAdapter(BaseAdapter):
         Playwright page reference must be injected via _pw_page for live runs.
         Strategy 1 calls toc_fic_show_all() to load all chapters at once.
         Strategy 2 (fallback) clicks through paginated TOC pages.
+
+        IMPORTANT: scraper_service must call get_page_content() with
+        wait_until="load" for ScribbleHub so the site's JS bundle is fully
+        executed before this method receives the page. Without that, Strategy 1
+        will always fail with ReferenceError.
 
         Parameters:
             soup (BeautifulSoup): Parsed HTML of the novel landing page.
@@ -167,6 +169,25 @@ class ScribbleHubAdapter(BaseAdapter):
             # use the browser to get the full list regardless of page count.
             pw = self._pw_page
 
+            # ── Wait for JS bundle readiness ──────────────────────────────────
+            # toc_fic_show_all() is defined by ScribbleHub's own JS bundle.
+            # Even after "load" state, the function may not be attached yet if
+            # the bundle is deferred. We wait for #menu_icon_fic (the Show-All
+            # button's container) which only appears after scripts run, then
+            # add a small extra pause for any async module initialisation.
+            try:
+                pw.wait_for_selector("#menu_icon_fic", timeout=15_000)
+                pw.wait_for_timeout(1500)
+                if DEBUG:
+                    logger.debug("[parse] #menu_icon_fic found — JS bundle ready")
+            except Exception:
+                # Selector never appeared — extra pause as last resort
+                logger.warning(
+                    "[parse] #menu_icon_fic did not appear within 15s; "
+                    "proceeding anyway (toc_fic_show_all may fail)"
+                )
+                pw.wait_for_timeout(2000)
+
             # ── Strategy 1: toc_fic_show_all() ───────────────────────────────
             # Calls the same JS function as the "Show All Chapters" button.
             # NOTE: 'isdisabled' is added to #menu_icon_fic at the START of
@@ -190,9 +211,7 @@ class ScribbleHubAdapter(BaseAdapter):
                         f"[SH] Waiting for {chapter_count} chapters to render..."
                     )
                     pw.wait_for_function(
-                        f"""
-                        () => document.querySelectorAll('li.toc_w').length >= {chapter_count}
-                        """,
+                        f"() => document.querySelectorAll('li.toc_w').length >= {chapter_count}",
                         timeout=60_000,
                     )
                 else:
@@ -230,77 +249,127 @@ class ScribbleHubAdapter(BaseAdapter):
                     show_all_success = True
 
             except Exception as e:
-                logger.warning(
-                    f"[SH] toc_fic_show_all() failed ({e}), falling back to pagination loop."
-                )
+                error_str = str(e)
+                if "ReferenceError" in error_str and "toc_fic_show_all" in error_str:
+                    logger.warning(
+                        "[SH] toc_fic_show_all() is not defined — JS bundle may not "
+                        "have attached its globals yet. Falling back to pagination loop."
+                    )
+                else:
+                    logger.warning(
+                        f"[SH] toc_fic_show_all() failed ({e}), "
+                        f"falling back to pagination loop."
+                    )
 
             # ── Strategy 2: Pagination loop (fallback) ────────────────────────
-            # Used when show_all fails. Iterates TOC pages by clicking page links.
-            if not show_all_success and last_page > 1:
+            # Used when show_all fails or returns too few chapters.
+            # Also used for single-page TOCs when show_all is unavailable.
+            if not show_all_success:
+                # Re-read last_page from live DOM in case static HTML was stale
                 try:
-                    pw.select_option("select#show_chapters", value="50")
-                    pw.wait_for_function(
-                        "document.querySelectorAll('li.toc_w').length > 15",
-                        timeout=10_000,
+                    pw.wait_for_selector(
+                        "ul#pagination-mesh-toc, li.toc_w", timeout=10_000
                     )
-                    page1_soup = BeautifulSoup(pw.content(), "html.parser")
-                    chapters_by_order.clear()
-                    _extract_chapters(page1_soup)
-
-                    new_last = 1
-                    for a in page1_soup.select("ul#pagination-mesh-toc a.page-link"):
+                    live_soup = BeautifulSoup(pw.content(), "html.parser")
+                    for a in live_soup.select("ul#pagination-mesh-toc a.page-link"):
                         txt = a.get_text(strip=True)
                         if txt.isdigit():
-                            new_last = max(new_last, int(txt))
-                    last_page = new_last
-                    logger.info(
-                        f"[SH] Pagination fallback — {last_page} pages to iterate."
-                    )
+                            last_page = max(last_page, int(txt))
+                    if DEBUG:
+                        logger.debug(f"[parse] live DOM last_page re-read: {last_page}")
                 except Exception as e:
-                    logger.warning(f"[SH] Could not set display count: {e}")
+                    logger.warning(
+                        f"[SH] Could not re-read pagination from live DOM: {e}"
+                    )
 
-                for page_num in range(2, last_page + 1):
-                    logger.info(f"[SH] TOC page {page_num}/{last_page}")
+                if last_page > 1:
                     try:
-                        clicked = pw.evaluate(f"""
-                            (() => {{
-                                const links = document.querySelectorAll('ul#pagination-mesh-toc a.page-link');
-                                for (const a of links) {{
-                                    if (a.textContent.trim() === '{page_num}') {{
-                                        a.click();
-                                        return true;
-                                    }}
-                                }}
-                                const next = document.querySelector('ul#pagination-mesh-toc a.page-link.next');
-                                if (next) {{ next.click(); return 'next'; }}
-                                return false;
-                            }})()
-                        """)
-                        if not clicked:
-                            logger.warning(
-                                f"[SH] Page {page_num} link not found in pagination bar, stopping."
-                            )
-                            break
-
+                        pw.select_option("select#show_chapters", value="50")
                         pw.wait_for_function(
-                            f"""
-                            (() => {{
-                                const active = document.querySelector(
-                                    'ul#pagination-mesh-toc li.active a, '
-                                    'ul#pagination-mesh-toc li.active span'
-                                );
-                                return active && active.textContent.trim() === '{page_num}';
-                            }})()
-                            """,
-                            timeout=15_000,
+                            "document.querySelectorAll('li.toc_w').length > 15",
+                            timeout=10_000,
                         )
-                        pw.wait_for_timeout(500)
-                        page_soup = BeautifulSoup(pw.content(), "html.parser")
-                        _extract_chapters(page_soup)
+                        page1_soup = BeautifulSoup(pw.content(), "html.parser")
+                        chapters_by_order.clear()
+                        _extract_chapters(page1_soup)
 
+                        new_last = 1
+                        for a in page1_soup.select(
+                            "ul#pagination-mesh-toc a.page-link"
+                        ):
+                            txt = a.get_text(strip=True)
+                            if txt.isdigit():
+                                new_last = max(new_last, int(txt))
+                        last_page = new_last
+                        logger.info(
+                            f"[SH] Pagination fallback — {last_page} pages to iterate."
+                        )
                     except Exception as e:
-                        logger.warning(f"[SH] Page {page_num} failed ({e}), skipping.")
-                        continue
+                        logger.warning(f"[SH] Could not set display count: {e}")
+
+                    for page_num in range(2, last_page + 1):
+                        logger.info(f"[SH] TOC page {page_num}/{last_page}")
+                        try:
+                            clicked = pw.evaluate(f"""
+                                (() => {{
+                                    const links = document.querySelectorAll(
+                                        'ul#pagination-mesh-toc a.page-link'
+                                    );
+                                    for (const a of links) {{
+                                        if (a.textContent.trim() === '{page_num}') {{
+                                            a.click();
+                                            return true;
+                                        }}
+                                    }}
+                                    const next = document.querySelector(
+                                        'ul#pagination-mesh-toc a.page-link.next'
+                                    );
+                                    if (next) {{ next.click(); return 'next'; }}
+                                    return false;
+                                }})()
+                            """)
+                            if not clicked:
+                                logger.warning(
+                                    f"[SH] Page {page_num} link not found in "
+                                    f"pagination bar, stopping."
+                                )
+                                break
+
+                            pw.wait_for_function(
+                                f"""
+                                (() => {{
+                                    const active = document.querySelector(
+                                        'ul#pagination-mesh-toc li.active a, '
+                                        'ul#pagination-mesh-toc li.active span'
+                                    );
+                                    return active &&
+                                        active.textContent.trim() === '{page_num}';
+                                }})()
+                                """,
+                                timeout=15_000,
+                            )
+                            pw.wait_for_timeout(500)
+                            page_soup = BeautifulSoup(pw.content(), "html.parser")
+                            _extract_chapters(page_soup)
+
+                        except Exception as e:
+                            logger.warning(
+                                f"[SH] Page {page_num} failed ({e}), skipping."
+                            )
+                            continue
+                else:
+                    # Single-page TOC — extract from current live DOM
+                    try:
+                        pw.wait_for_selector("li.toc_w", timeout=10_000)
+                        single_soup = BeautifulSoup(pw.content(), "html.parser")
+                        chapters_by_order.clear()
+                        _extract_chapters(single_soup)
+                        logger.info(
+                            f"[SH] Single-page TOC — "
+                            f"{len(chapters_by_order)} chapters extracted from live DOM."
+                        )
+                    except Exception as e:
+                        logger.warning(f"[SH] Could not extract single-page TOC: {e}")
 
         elif last_page > 1:
             logger.warning(

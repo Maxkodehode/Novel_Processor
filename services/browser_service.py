@@ -1,24 +1,14 @@
 # =============================================================================
 # CHANGES:
-#   - Persistent context: _context is now created once in start() and reused
-#     across all get_page_content() calls. Previously a new context was created
-#     per request, which discarded cookies/session state every time and made
-#     every request look like a brand-new user — a classic bot signal.
-#   - Stealth: playwright-stealth is applied to every new page via stealth_sync().
-#     This masks navigator.webdriver, canvas fingerprint, and other headless
-#     browser artifacts that WAFs check for.
-#   - Realistic viewport: context is launched with 1920x1080 instead of the
-#     default headless size (often 800x600), which is a known bot indicator.
-#   - Resource blocking: images, media, fonts, and stylesheets are blocked by
-#     default. These are not needed for HTML scraping and blocking them reduces
-#     bandwidth, speeds up page loads, and removes ad/tracking network calls
-#     that can trigger "ad-blocker detected" responses. Pass
-#     block_resources=False to disable for pages that need full rendering.
-#   - Page lifecycle: get_page_content() now always closes the page in a
-#     finally block for non-ScribbleHub callers. ScribbleHub adapter needs the
-#     live page reference for JS evaluation — caller (scraper_service) is
-#     responsible for closing those pages explicitly.
-#   - stop(): also closes the persistent context before stopping the browser.
+#   - get_page_content(): Added `wait_until` parameter (default "domcontentloaded")
+#     so callers can request "load" or "networkidle" without changing behaviour
+#     for all other sites. ScribbleHub passes "load" so its JS bundle fully
+#     executes before the page is returned to the adapter.
+#   - get_page_content(): Under DEBUG mode, logs which URL stealth was applied to
+#     and logs every blocked resource type so it is possible to confirm blocking
+#     is working as expected.
+#   - Removed duplicate "In browser_service.py" comments left over from copy-paste.
+#   - All other behaviour unchanged.
 # =============================================================================
 
 import logging
@@ -28,8 +18,6 @@ print(f"DEBUG: Python executable: {sys.executable}")
 print(f"DEBUG: sys.path: {sys.path}")
 from playwright.sync_api import sync_playwright
 
-# In browser_service.py
-# In browser_service.py
 try:
     from playwright_stealth import stealth_sync
 
@@ -119,6 +107,7 @@ class BrowserService:
         timeout: int = TIMEOUT,
         block_resources: bool = True,
         keep_page_open: bool = False,
+        wait_until: str = "domcontentloaded",
     ) -> tuple[str, object]:
         """
         Fetches a URL using the persistent browser context.
@@ -138,13 +127,18 @@ class BrowserService:
                                    which needs the live page for JS evaluation.
                                    If False, the page is closed before returning
                                    and the returned page object must not be used.
+            wait_until (str): Playwright navigation event to wait for before
+                              returning. Default is "domcontentloaded" (fast).
+                              Pass "load" for pages that require the full JS bundle
+                              to execute (e.g. ScribbleHub). Pass "networkidle"
+                              for pages with heavy async data loading.
 
         Returns:
             tuple[str, Page]: (html_content, playwright_page). If keep_page_open
                               is False, the page is already closed — only the html
                               string is usable.
 
-        Called by: ScraperService.scrape_novel()
+        Called by: ScraperService.scrape_novel(), CoverManager._download_via_browser()
         Depends on: _context, stealth_sync, _BLOCKED_RESOURCES
         """
         if not self._context:
@@ -163,6 +157,11 @@ class BrowserService:
 
             def _block_handler(route):
                 if route.request.resource_type in _BLOCKED_RESOURCES:
+                    if DEBUG:
+                        logger.debug(
+                            f"[get_page_content] blocked {route.request.resource_type}: "
+                            f"{route.request.url[:80]}"
+                        )
                     route.abort()
                 else:
                     route.continue_()
@@ -171,16 +170,19 @@ class BrowserService:
 
         try:
             if DEBUG:
-                logger.debug(f"[get_page_content] navigating to {url}")
+                logger.debug(
+                    f"[get_page_content] navigating to {url} (wait_until={wait_until})"
+                )
 
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            page.goto(url, wait_until=wait_until, timeout=timeout * 1000)
 
             if wait_selector:
                 try:
                     page.wait_for_selector(wait_selector, timeout=15_000)
                 except Exception:
                     logger.debug(
-                        f"Selector '{wait_selector}' wait timed out, continuing."
+                        f"[get_page_content] selector '{wait_selector}' wait timed out "
+                        f"for {url}, continuing."
                     )
 
             content = page.content()
@@ -194,7 +196,7 @@ class BrowserService:
             return content, None
 
         except Exception as e:
-            logger.error(f"Playwright error for {url}: {e}")
+            logger.error(f"[get_page_content] Playwright error for {url}: {e}")
             try:
                 page.close()
             except Exception:

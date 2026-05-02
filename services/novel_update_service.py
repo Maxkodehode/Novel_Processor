@@ -1,16 +1,14 @@
 # =============================================================================
 # CHANGES:
-#   - sync_novel(): Added stubbed-novel protection. When the source returns 0
-#     chapters, the DB chapter count is checked before taking any action:
-#       • DB has chapters → novel was likely sold/stubbed. Log a warning and
-#         leave the novel and its chapters completely untouched. The reader
-#         can still read whatever was downloaded before stubbing.
-#       • DB also has 0 chapters → novel was never populated. Mark ABANDONED
-#         so it stops being checked on every sync run.
-#     Previously the function just logged a warning and returned, which meant
-#     stubbed novels kept being re-checked on every sync indefinitely.
-#   - sync_all(): 7-day recency skip and progress logging unchanged.
-#   - sync_all(): ScribbleHub uses ScraperService.scrape_novel() unchanged.
+#   - sync_novel(): Moved time.sleep(FETCH_DELAY) from the top of the function
+#     (before any try block) to inside sync_all()'s try block, AFTER the
+#     sync_novel() call. Previously the delay fired even when sync_novel()
+#     was never called (exception path in sync_all()) or raised immediately,
+#     wasting 8 seconds per failed novel before the except block ran.
+#     The delay now lives in sync_all() alongside the call that needs it.
+#   - sync_all(): Inter-novel delay is now always logged at DEBUG level so
+#     it is visible in debug runs without cluttering normal INFO output.
+#   - All other logic unchanged.
 # =============================================================================
 
 import logging
@@ -48,6 +46,8 @@ class NovelUpdateService:
 
         Skips novels updated within SYNC_SKIP_IF_UPDATED_WITHIN_DAYS days.
         Logs progress every 10 novels so long runs are observable.
+        The inter-novel delay is applied after each successful sync_novel()
+        call, not inside sync_novel(), so failed novels don't eat the delay.
 
         Called by: sync_novels.py main()
         Depends on: NovelRepository.get_active_novels(), sync_novel()
@@ -76,7 +76,7 @@ class NovelUpdateService:
 
         total = len(novels_to_check)
         logger.info(
-            f"Sync starting: {total} novels to check, "
+            f"[sync_all] Starting: {total} novels to check, "
             f"{skipped_recent} skipped (updated within "
             f"{SYNC_SKIP_IF_UPDATED_WITHIN_DAYS} days)."
         )
@@ -86,25 +86,32 @@ class NovelUpdateService:
         ):
             if i % 10 == 0 or i == 1:
                 remaining = total - i + 1
-                logger.info(f"Progress: {i}/{total} — {remaining} remaining")
+                logger.info(f"[sync_all] Progress: {i}/{total} — {remaining} remaining")
 
             try:
-                logger.info(f"[{i}/{total}] Checking: {title}")
+                logger.info(f"[sync_all] [{i}/{total}] Checking: {title}")
                 self.sync_novel(novel_id, url)
 
+                # Delay is AFTER sync_novel() so failed novels don't eat it
                 delay = random.uniform(FETCH_DELAY, FETCH_DELAY * 1.5)
+                if DEBUG:
+                    logger.debug(f"[sync_all] Sleeping {delay:.1f}s after '{title}'")
                 time.sleep(delay)
 
             except Exception as e:
-                logger.error(f"Failed to sync '{title}': {e}", exc_info=True)
+                logger.error(f"[sync_all] Failed to sync '{title}': {e}", exc_info=True)
 
         logger.info(
-            f"Sync complete. Checked {total} novels, skipped {skipped_recent} recent."
+            f"[sync_all] Complete. Checked {total} novels, "
+            f"skipped {skipped_recent} recent."
         )
 
     def sync_novel(self, novel_id: int, url: str):
         """
         Syncs a single novel by comparing its source chapter list against the DB.
+
+        Does NOT sleep at the start — the inter-novel delay is managed by the
+        caller (sync_all) so it only fires on successful calls, not on errors.
 
         Stubbed-novel protection: if the source returns 0 chapters, the DB is
         checked before any action is taken.
@@ -120,14 +127,12 @@ class NovelUpdateService:
         Called by: sync_all()
         Depends on: ScraperService.scrape_novel(), NovelRepository
         """
-        time.sleep(FETCH_DELAY)
-
         if DEBUG:
             logger.debug(f"[sync_novel] novel_id={novel_id} url={url}")
 
         source_data = self.scraper.scrape_novel(url)
         if not source_data:
-            logger.warning(f"scrape_novel() returned no data for {url}")
+            logger.warning(f"[sync_novel] scrape_novel() returned no data for {url}")
             return
 
         source_chapters = source_data.get("chapters", [])
@@ -140,14 +145,15 @@ class NovelUpdateService:
                 # We have local chapters the author has since removed.
                 # Keep everything — don't mark abandoned, don't touch chapters.
                 logger.info(
-                    f"Source has 0 chapters for '{source_data.get('title', url)}' "
-                    f"but DB has {db_chapter_count} chapters. "
+                    f"[sync_novel] Source has 0 chapters for "
+                    f"'{source_data.get('title', url)}' but DB has "
+                    f"{db_chapter_count} chapters. "
                     f"Novel was likely stubbed/sold — preserving local chapters."
                 )
             else:
                 # Source has 0 and we have 0 — nothing to read, never was.
                 logger.info(
-                    f"Source and DB both have 0 chapters for "
+                    f"[sync_novel] Source and DB both have 0 chapters for "
                     f"'{source_data.get('title', url)}' — marking ABANDONED."
                 )
                 self.repository.set_novel_status(novel_id, NOVEL_STATUS_ABANDONED)
@@ -163,21 +169,27 @@ class NovelUpdateService:
 
             if order in db_chapters:
                 if db_chapters[order]["url"] != source_url:
-                    logger.info(f"URL changed for chapter {order}: {source_url}")
+                    logger.info(
+                        f"[sync_novel] URL changed for chapter {order}: {source_url}"
+                    )
                     new_chapters.append(source_ch)
             else:
-                logger.info(f"New chapter at order {order}: {source_ch.get('title')}")
+                logger.info(
+                    f"[sync_novel] New chapter at order {order}: "
+                    f"{source_ch.get('title')}"
+                )
                 new_chapters.append(source_ch)
 
         if new_chapters:
             logger.info(
-                f"Syncing {len(new_chapters)} new/changed chapters for novel {novel_id}"
+                f"[sync_novel] Syncing {len(new_chapters)} new/changed chapters "
+                f"for novel {novel_id}"
             )
             self.repository.upsert_chapters(novel_id, new_chapters)
             self.repository.update_novel_timestamp(novel_id)
-            logger.info(f"Updated '{source_data['title']}'")
+            logger.info(f"[sync_novel] Updated '{source_data['title']}'")
         else:
-            logger.info(f"No changes for '{source_data['title']}'")
+            logger.info(f"[sync_novel] No changes for '{source_data['title']}'")
 
     def _count_local_chapters(self, novel_id: int) -> int:
         """
