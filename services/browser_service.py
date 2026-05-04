@@ -1,5 +1,16 @@
 # =============================================================================
 # CHANGES:
+#   - get_page_content(): When keep_page_open=True, the page-level block route
+#     handler is now unrouted before returning the page to the caller.
+#     Previously the "**/*" block handler remained active on the page permanently.
+#     This caused any subsequent page.route() calls installed by the adapter
+#     (e.g. on "**/admin-ajax.php") to silently fail: Playwright fires route
+#     handlers in registration order and calls to route.continue_() from the
+#     first handler consume the route event, so later handlers never execute.
+#     For ScribbleHub this meant the AJAX intercept route never fired, causing
+#     15-second timeouts on every pagination attempt.
+#     Unrouting on keep_page_open=True is safe because the caller takes
+#     ownership of the page and is responsible for managing its own routes.
 #   - get_page_content(): Added `wait_until` parameter (default "domcontentloaded")
 #     so callers can request "load" or "networkidle" without changing behaviour
 #     for all other sites. ScribbleHub passes "load" so its JS bundle fully
@@ -7,7 +18,6 @@
 #   - get_page_content(): Under DEBUG mode, logs which URL stealth was applied to
 #     and logs every blocked resource type so it is possible to confirm blocking
 #     is working as expected.
-#   - Removed duplicate "In browser_service.py" comments left over from copy-paste.
 #   - All other behaviour unchanged.
 # =============================================================================
 
@@ -116,12 +126,21 @@ class BrowserService:
         images, media, fonts, and stylesheets by default to reduce bandwidth
         and avoid triggering tracking/ad networks.
 
+        When keep_page_open=True, the block route handler is unrouted before
+        the page is returned to the caller. This is essential when the caller
+        needs to install their own page.route() handlers (e.g. ScribbleHub
+        adapter intercepting admin-ajax.php): Playwright fires route handlers
+        in registration order, and the "**/*" block handler's route.continue_()
+        would consume every route event before the caller's handler could run.
+
         Parameters:
             url (str): The URL to navigate to.
             wait_selector (str | None): Optional CSS selector to wait for after load.
             timeout (int): Navigation timeout in seconds.
-            block_resources (bool): If True, block images/media/fonts/CSS.
-                                    Set False for pages that need full rendering.
+            block_resources (bool): If True, block images/media/fonts/CSS during
+                                    initial page load. Always unrouted before the
+                                    page is handed to the caller when keep_page_open
+                                    is True.
             keep_page_open (bool): If True, the caller is responsible for closing
                                    the returned page. Used by ScribbleHub adapter
                                    which needs the live page for JS evaluation.
@@ -152,7 +171,9 @@ class BrowserService:
             if DEBUG:
                 logger.debug(f"[get_page_content] stealth applied for {url}")
 
-        # Block unnecessary resource types to reduce footprint
+        # Block unnecessary resource types to reduce footprint.
+        # Keep a reference to the handler so we can unroute it later.
+        _block_handler = None
         if block_resources:
 
             def _block_handler(route):
@@ -188,7 +209,21 @@ class BrowserService:
             content = page.content()
 
             if keep_page_open:
-                # Caller is responsible for closing this page
+                # Unroute the block handler BEFORE returning the page.
+                # The caller will install their own route handlers and the
+                # "**/*" glob would otherwise intercept and consume every
+                # route event before the caller's handlers could run.
+                if _block_handler is not None:
+                    try:
+                        page.unroute("**/*", _block_handler)
+                        if DEBUG:
+                            logger.debug(
+                                f"[get_page_content] block handler unrouted for {url}"
+                            )
+                    except Exception as e:
+                        logger.debug(
+                            f"[get_page_content] unroute failed (non-fatal): {e}"
+                        )
                 return content, page
 
             # Close the page now — caller only needs the HTML string

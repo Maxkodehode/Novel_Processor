@@ -1,14 +1,18 @@
 # =============================================================================
 # CHANGES:
-#   - scrape_novel(): ScribbleHub now calls get_page_content() with
-#     wait_until="load" so the full JS bundle executes before the page is
-#     returned to the adapter. This is the primary fix for the
-#     toc_fic_show_all ReferenceError — the function is only defined after
-#     the site's scripts have fully run.
-#   - fetch_chapters(): Added `url` to all retry and fail log lines so
-#     failed URLs are identifiable in logs without cross-referencing the DB.
-#   - fetch_chapters(): Added an info log before the RunLogger block for the
-#     zero-tasks case so zero-task runs are visible in the console log.
+#   - scrape_novel(): ScribbleHub now passes block_resources=False to
+#     get_page_content(). Previously block_resources defaulted to True, which
+#     installed a "**/*" route handler that remained active on the page even
+#     after it was handed to the adapter. Because Playwright fires route handlers
+#     in registration order and route.continue_() consumes the event, the
+#     adapter's own page.route("**/admin-ajax.php") handler never fired —
+#     causing 15-second timeouts on every pagination attempt.
+#     With block_resources=False, no competing route handler is installed and
+#     the adapter's intercept routes work correctly.
+#     Images/media/fonts are already absent from ScribbleHub's chapter list
+#     page DOM, so not blocking them has no meaningful performance impact.
+#   - scrape_novel(): ScribbleHub still passes wait_until="load" so the full
+#     JS bundle executes before the page is returned to the adapter.
 #   - All other logic unchanged.
 # =============================================================================
 
@@ -52,10 +56,13 @@ class ScraperService:
         """
         Fetches and parses a novel landing page.
 
-        For ScribbleHub, always uses Playwright with keep_page_open=True and
-        wait_until="load" so the full JS bundle executes before the adapter
-        receives the page. The page is explicitly closed in a finally block
-        after the adapter is done with it.
+        For ScribbleHub, always uses Playwright with keep_page_open=True,
+        wait_until="load", and block_resources=False. The full JS bundle must
+        execute and remain active so that pagination click handlers can fire
+        AJAX requests that the adapter intercepts via page.route(). Blocking
+        resources would install a competing "**/*" route handler that consumes
+        route events before the adapter's handler runs.
+
         For all other sites, tries fast network fetch first with Playwright as
         fallback. Playwright fallback uses keep_page_open=False so the page is
         closed inside get_page_content() immediately after HTML capture.
@@ -86,14 +93,19 @@ class ScraperService:
             return adapter.parse(soup, url)
 
         # --- ScribbleHub: always Playwright with full page load ---
-        # wait_until="load" ensures the JS bundle is fully executed before
-        # the adapter tries to call toc_fic_show_all() on the live page.
+        # block_resources=False: ScribbleHub's pagination clicks fire AJAX
+        # requests that the adapter intercepts via page.route(). A competing
+        # "**/*" block handler would consume those route events first, making
+        # the adapter's intercept handler unreachable.
+        # wait_until="load": ensures the JS bundle is fully executed.
+        # keep_page_open=True: adapter needs the live page for route interception.
         if isinstance(adapter, ScribbleHubAdapter):
             logger.info(f"[SH] Forcing Playwright for ScribbleHub: {url}")
             html, pw_page = self.browser.get_page_content(
                 url,
                 keep_page_open=True,
                 wait_until="load",
+                block_resources=False,
             )
             adapter._pw_page = pw_page
             try:

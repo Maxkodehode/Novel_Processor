@@ -1,37 +1,19 @@
-# =============================================================================
-# backfill_covers.py
-#
-# PURPOSE:
-#   Audits every non-ABANDONED novel in the database for a valid cover image
-#   and fetches one if any of the following conditions are true:
-#     1. cover_path is NULL or empty — cover was never downloaded.
-#     2. cover_path points to a file that no longer exists on disk.
-#     3. The cover file exists but is smaller than MIN_VALID_COVER_BYTES (1 KB
-#        by default) — indicates a failed/placeholder download.
-#
-#   For novels that need a cover, the script uses the cover_url already stored
-#   in the DB. If cover_url is also missing, the novel is skipped unless
-#   --re-scrape is passed, in which case the novel landing page is re-scraped
-#   to obtain a fresh URL before downloading.
-#
-# USAGE:
-#   python backfill_covers.py                  # fix all novels missing valid covers
-#   python backfill_covers.py --dry-run        # preview affected novels, no changes
-#   python backfill_covers.py --id 42          # fix a single novel by DB id
-#   python backfill_covers.py --re-scrape      # re-scrape landing pages for novels
-#                                              # where cover_url is NULL or download fails
-#   python backfill_covers.py --min-size 2048  # treat files < 2 KB as invalid
-#   python backfill_covers.py --delay-min 4 --delay-max 8  # override inter-novel delay
-#
-# SAFE TO RE-RUN:
-#   CoverManager.download_and_save() always replaces the existing file before
-#   writing, so re-running this script is non-destructive.
-#
-# RATE LIMITING:
-#   A jittered sleep of COVER_BACKFILL_DELAY_MIN–MAX seconds is applied between
-#   each cover download. An additional COVER_FETCH_DELAY (from config.py) is
-#   applied inside CoverManager before each HTTP request. Together these ensure
-#   downloads are spaced out enough to avoid triggering CDN rate limits.
+# CHANGES:
+#   - fix_cover(): Added pre-flight placeholder URL check (Step 0). When the
+#     stored cover_url is a known placeholder (e.g. /dist/img/nocover-new-min.png),
+#     the novel is now counted as 'skipped' rather than 'failed'. Previously
+#     these went through download_and_save(), which correctly rejected them, but
+#     then fix_cover() reported them as failures and printed misleading "✗ Failed"
+#     lines. Now they are logged with a clear message and --re-scrape suggestion.
+#   - fix_cover(): If --re-scrape is active and the stored URL is a placeholder,
+#     we re-scrape the novel page first to check whether the author has since
+#     added a real cover, before giving up with 'skipped'.
+#   - fix_cover(): Delay logic extracted to _apply_delay() helper so all early-
+#     return paths apply the inter-novel delay consistently — previously some
+#     early returns skipped the delay entirely, bunching up requests.
+#   - _is_placeholder_url(): New helper using the same fragment list as
+#     CoverManager internally so placeholder detection is consistent.
+#   - All audit, DB query, and rate-limiting logic otherwise unchanged.
 # =============================================================================
 
 import argparse
@@ -52,22 +34,50 @@ logger = logging.getLogger(__name__)
 
 DEBUG = False
 
-# ---------------------------------------------------------------------------
-# Configurable defaults (overridable via CLI flags)
-# ---------------------------------------------------------------------------
+MIN_VALID_COVER_BYTES = 1024
+COVER_BACKFILL_DELAY_MIN = 5
+COVER_BACKFILL_DELAY_MAX = 10
 
-# Files below this size (in bytes) are treated as invalid covers
-MIN_VALID_COVER_BYTES = 1024  # 1 KB
-
-# Inter-novel delay range (seconds) — applied between each cover download
-# Keep these conservative; CDNs share rate-limit budgets across novels.
-COVER_BACKFILL_DELAY_MIN = 5  # seconds
-COVER_BACKFILL_DELAY_MAX = 10  # seconds
+# Same fragments CoverManager uses — keep in sync if CoverManager changes
+_PLACEHOLDER_FRAGMENTS = ["d_60_90.jpg", "nocover-new-min.png", "default-cover"]
 
 
-# ---------------------------------------------------------------------------
-# Database helpers
-# ---------------------------------------------------------------------------
+def _is_placeholder_url(cover_url: str) -> bool:
+    """
+    Returns True if cover_url is a known generic placeholder that cannot be
+    downloaded as a real cover image.
+
+    Parameters:
+        cover_url (str): The URL to test.
+
+    Returns:
+        bool
+
+    Called by: fix_cover()
+    Depends on: _PLACEHOLDER_FRAGMENTS
+    """
+    if not cover_url:
+        return False
+    lower = cover_url.lower()
+    return any(frag in lower for frag in _PLACEHOLDER_FRAGMENTS)
+
+
+def _apply_delay(delay_min: float, delay_max: float, title: str):
+    """
+    Applies a jittered inter-novel delay for CDN rate limiting.
+
+    Parameters:
+        delay_min (float): Minimum delay in seconds.
+        delay_max (float): Maximum delay in seconds.
+        title (str): Novel title (for DEBUG logging).
+
+    Called by: fix_cover() (all return paths)
+    Depends on: random.uniform, time.sleep
+    """
+    delay = random.uniform(delay_min, delay_max)
+    if DEBUG:
+        logger.debug(f"[_apply_delay] sleeping {delay:.1f}s after '{title}'")
+    time.sleep(delay)
 
 
 def get_all_novels(db_manager: DatabaseManager) -> list[tuple]:
@@ -78,10 +88,10 @@ def get_all_novels(db_manager: DatabaseManager) -> list[tuple]:
         db_manager (DatabaseManager): Active DB manager instance.
 
     Returns:
-        list[tuple]: List of (id, title, slug, source_url, cover_path, cover_url).
+        list[tuple]: (id, title, slug, source_url, cover_path, cover_url).
 
     Called by: main()
-    Depends on: DatabaseManager.execute(), NOVEL_STATUS_ABANDONED
+    Depends on: DatabaseManager.execute()
     """
     query = """
             SELECT id, title, slug, source_url, cover_path, cover_url
@@ -98,10 +108,10 @@ def get_single_novel(db_manager: DatabaseManager, novel_id: int) -> tuple | None
 
     Parameters:
         db_manager (DatabaseManager): Active DB manager instance.
-        novel_id (int): The DB id of the novel to look up.
+        novel_id (int): The DB id of the novel.
 
     Returns:
-        tuple | None: (id, title, slug, source_url, cover_path, cover_url) or None.
+        tuple | None
 
     Called by: main()
     Depends on: DatabaseManager.execute()
@@ -113,57 +123,26 @@ def get_single_novel(db_manager: DatabaseManager, novel_id: int) -> tuple | None
     return rows[0] if rows else None
 
 
-# ---------------------------------------------------------------------------
-# Cover validity check
-# ---------------------------------------------------------------------------
-
-
 def cover_is_valid(cover_path: str | None, min_size: int) -> bool:
     """
-    Determines whether a novel's cover file meets validity requirements.
-
-    A cover is considered invalid if:
-      - cover_path is None or an empty string.
-      - The file at cover_path does not exist on disk.
-      - The file exists but its size is below min_size bytes.
+    Returns True if cover_path points to an existing file >= min_size bytes.
 
     Parameters:
-        cover_path (str | None): Relative or absolute path to the cover file.
-        min_size (int): Minimum acceptable file size in bytes.
+        cover_path (str | None): Path to check.
+        min_size (int): Minimum file size in bytes.
 
     Returns:
-        bool: True if the cover is present and valid, False otherwise.
+        bool
 
     Called by: audit_novels()
     Depends on: os.path.exists(), os.path.getsize()
     """
     if not cover_path:
-        if DEBUG:
-            logger.debug("[cover_is_valid] cover_path is empty — invalid")
         return False
-
-    # Resolve relative paths against the current working directory
     abs_path = cover_path if os.path.isabs(cover_path) else os.path.abspath(cover_path)
-
     if not os.path.exists(abs_path):
-        if DEBUG:
-            logger.debug(f"[cover_is_valid] file not found: {abs_path}")
         return False
-
-    size = os.path.getsize(abs_path)
-    if size < min_size:
-        if DEBUG:
-            logger.debug(
-                f"[cover_is_valid] file too small: {abs_path} ({size} bytes < {min_size})"
-            )
-        return False
-
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Per-novel cover fix logic
-# ---------------------------------------------------------------------------
+    return os.path.getsize(abs_path) >= min_size
 
 
 def fix_cover(
@@ -173,7 +152,7 @@ def fix_cover(
     source_url: str | None,
     cover_url: str | None,
     cover_manager: CoverManager,
-    scraper: ScraperService | None,
+    scraper,
     repo: NovelRepository,
     re_scrape: bool,
     delay_min: float,
@@ -183,26 +162,24 @@ def fix_cover(
     Attempts to download a valid cover for a single novel.
 
     Strategy:
-      1. If cover_url is available, attempt download immediately.
-      2. If cover_url is NULL and re_scrape=True, re-scrape the landing page
-         to get a fresh cover_url, then attempt download.
-      3. If cover_url is NULL and re_scrape=False, skip with a warning.
-      4. If the download fails and re_scrape=True, re-scrape and retry once.
+      0. If cover_url is a placeholder image, skip (or re-scrape if enabled).
+      1. If cover_url is NULL and re_scrape=True, re-scrape to find a URL.
+      2. If cover_url is NULL and re_scrape=False, skip with a warning.
+      3. Attempt download via CoverManager.
+      4. If download fails and re_scrape=True, re-scrape for a fresh URL and retry.
 
-    A jittered delay of delay_min–delay_max seconds is applied after each
-    download attempt (success or failure) to rate-limit CDN requests.
+    The inter-novel delay is always applied regardless of outcome.
 
     Parameters:
         novel_id (int): DB id of the novel.
         title (str): Novel title (for logging).
-        slug (str): Novel slug (used in filename by CoverManager).
-        source_url (str | None): Novel landing page URL (for re-scraping).
-        cover_url (str | None): Current cover_url from the DB.
+        slug (str): URL-safe slug for file naming.
+        source_url (str | None): Landing page URL (for re-scraping).
+        cover_url (str | None): Current DB cover_url.
         cover_manager (CoverManager): Initialized cover manager.
-        scraper (ScraperService | None): Initialized scraper (needed for re-scrape).
+        scraper: ScraperService instance or None.
         repo (NovelRepository): Initialized repository.
-        re_scrape (bool): Whether to re-scrape the landing page if cover_url is
-                          missing or the download fails.
+        re_scrape (bool): Whether to re-scrape on missing/failed URLs.
         delay_min (float): Minimum inter-novel delay in seconds.
         delay_max (float): Maximum inter-novel delay in seconds.
 
@@ -211,40 +188,76 @@ def fix_cover(
 
     Called by: main()
     Depends on: CoverManager.download_and_save(), ScraperService.scrape_novel(),
-                NovelRepository.db.execute()
+                _is_placeholder_url(), _apply_delay()
     """
     if DEBUG:
         logger.debug(
-            f"[fix_cover] novel_id={novel_id} cover_url={cover_url} "
-            f"re_scrape={re_scrape}"
+            f"[fix_cover] novel_id={novel_id} cover_url={cover_url} re_scrape={re_scrape}"
         )
 
     active_cover_url = cover_url
 
-    # --- Step 1: If no cover_url in DB, optionally re-scrape to get one ---
+    # --- Step 0: Placeholder URL pre-flight check ---
+    # e.g. /dist/img/nocover-new-min.png — no point attempting a download.
+    # Count as 'skipped', not 'failed', because the source site has no cover.
+    if active_cover_url and _is_placeholder_url(active_cover_url):
+        if re_scrape and source_url and scraper:
+            logger.info(
+                f"  '{title}' — stored URL is a placeholder; re-scraping for real cover..."
+            )
+            try:
+                data = scraper.scrape_novel(source_url)
+                fresh_url = data.get("cover_url") if data else None
+                if fresh_url and not _is_placeholder_url(fresh_url):
+                    active_cover_url = fresh_url
+                    repo.db.execute(
+                        "UPDATE novels SET cover_url = ? WHERE id = ?",
+                        (active_cover_url, novel_id),
+                        commit=True,
+                    )
+                    logger.info(
+                        f"  Got real cover_url for '{title}': {active_cover_url}"
+                    )
+                else:
+                    logger.info(
+                        f"  Re-scrape for '{title}' also returned no real cover. Skipping."
+                    )
+                    _apply_delay(delay_min, delay_max, title)
+                    return "skipped"
+            except Exception as e:
+                logger.error(f"  Re-scrape failed for '{title}': {e}")
+                _apply_delay(delay_min, delay_max, title)
+                return "failed"
+        else:
+            logger.info(
+                f"  '{title}' — cover_url is a placeholder. "
+                f"Re-run with --re-scrape to check for a real cover."
+            )
+            _apply_delay(delay_min, delay_max, title)
+            return "skipped"
+
+    # --- Step 1: No cover_url at all ---
     if not active_cover_url:
         if not re_scrape:
             logger.warning(
                 f"  '{title}' — no cover_url in DB and --re-scrape not set. Skipping."
             )
+            _apply_delay(delay_min, delay_max, title)
             return "skipped"
 
-        if not source_url:
-            logger.warning(f"  '{title}' — no source_url, cannot re-scrape. Skipping.")
-            return "skipped"
-
-        if not scraper:
+        if not source_url or not scraper:
             logger.warning(
-                f"  '{title}' — scraper not available for re-scrape. Skipping."
+                f"  '{title}' — cannot re-scrape (missing source_url or scraper). Skipping."
             )
+            _apply_delay(delay_min, delay_max, title)
             return "skipped"
 
         logger.info(f"  '{title}' — cover_url missing, re-scraping: {source_url}")
         try:
             data = scraper.scrape_novel(source_url)
-            if data and data.get("cover_url"):
-                active_cover_url = data["cover_url"]
-                # Persist the fresh cover_url back to the DB
+            fresh_url = data.get("cover_url") if data else None
+            if fresh_url and not _is_placeholder_url(fresh_url):
+                active_cover_url = fresh_url
                 repo.db.execute(
                     "UPDATE novels SET cover_url = ? WHERE id = ?",
                     (active_cover_url, novel_id),
@@ -253,14 +266,16 @@ def fix_cover(
                 logger.info(f"  Updated cover_url for '{title}': {active_cover_url}")
             else:
                 logger.warning(
-                    f"  Re-scrape for '{title}' returned no cover_url. Skipping."
+                    f"  Re-scrape for '{title}' returned no real cover_url. Skipping."
                 )
+                _apply_delay(delay_min, delay_max, title)
                 return "skipped"
         except Exception as e:
             logger.error(f"  Re-scrape failed for '{title}': {e}")
+            _apply_delay(delay_min, delay_max, title)
             return "failed"
 
-    # --- Step 2: Attempt cover download ---
+    # --- Step 2: Attempt download ---
     logger.info(f"  Downloading cover for '{title}' from: {active_cover_url}")
     result_path = None
     try:
@@ -268,7 +283,7 @@ def fix_cover(
     except Exception as e:
         logger.error(f"  cover_manager.download_and_save() raised: {e}")
 
-    # --- Step 3: If download failed and re_scrape is enabled, get a fresh URL ---
+    # --- Step 3: Re-scrape for fresh URL if download failed ---
     if not result_path and re_scrape and source_url and scraper:
         logger.info(
             f"  Download failed for '{title}', re-scraping for fresh cover_url..."
@@ -276,8 +291,11 @@ def fix_cover(
         try:
             data = scraper.scrape_novel(source_url)
             fresh_url = data.get("cover_url") if data else None
-            if fresh_url and fresh_url != active_cover_url:
-                # Persist the refreshed URL
+            if (
+                fresh_url
+                and fresh_url != active_cover_url
+                and not _is_placeholder_url(fresh_url)
+            ):
                 repo.db.execute(
                     "UPDATE novels SET cover_url = ? WHERE id = ?",
                     (fresh_url, novel_id),
@@ -294,11 +312,7 @@ def fix_cover(
         except Exception as e:
             logger.error(f"  Re-scrape retry failed for '{title}': {e}")
 
-    # --- Apply inter-novel rate-limit delay ---
-    delay = random.uniform(delay_min, delay_max)
-    if DEBUG:
-        logger.debug(f"[fix_cover] sleeping {delay:.1f}s after '{title}'")
-    time.sleep(delay)
+    _apply_delay(delay_min, delay_max, title)
 
     if result_path:
         logger.info(f"  ✓ Cover saved for '{title}': {result_path}")
@@ -308,26 +322,16 @@ def fix_cover(
         return "failed"
 
 
-# ---------------------------------------------------------------------------
-# Audit pass — classify all novels
-# ---------------------------------------------------------------------------
-
-
-def audit_novels(
-    novels: list[tuple],
-    min_size: int,
-) -> tuple[list[tuple], list[tuple]]:
+def audit_novels(novels: list[tuple], min_size: int) -> tuple[list, list]:
     """
-    Splits novels into those that need a cover and those that are already valid.
+    Splits novels into those needing a cover and those already valid.
 
     Parameters:
-        novels (list[tuple]): Full list of
-            (id, title, slug, source_url, cover_path, cover_url) tuples.
+        novels (list[tuple]): (id, title, slug, source_url, cover_path, cover_url).
         min_size (int): Minimum valid cover file size in bytes.
 
     Returns:
-        tuple[list[tuple], list[tuple]]:
-            (needs_cover, already_valid) — each entry is the original tuple.
+        tuple[list, list]: (needs_cover, already_valid).
 
     Called by: main()
     Depends on: cover_is_valid()
@@ -339,8 +343,6 @@ def audit_novels(
         novel_id, title, slug, source_url, cover_path, cover_url = row
         if cover_is_valid(cover_path, min_size):
             already_valid.append(row)
-            if DEBUG:
-                logger.debug(f"[audit] VALID cover for '{title}' at {cover_path}")
         else:
             reason = _invalid_reason(cover_path, min_size)
             logger.info(f"  Needs cover [{reason}]: '{title}' (id={novel_id})")
@@ -351,17 +353,9 @@ def audit_novels(
 
 def _invalid_reason(cover_path: str | None, min_size: int) -> str:
     """
-    Returns a human-readable reason why a cover is considered invalid.
-
-    Parameters:
-        cover_path (str | None): Path to the cover file.
-        min_size (int): Minimum valid size in bytes.
-
-    Returns:
-        str: Short description of the invalidity reason.
+    Returns a short human-readable reason a cover is invalid.
 
     Called by: audit_novels()
-    Depends on: os.path.exists(), os.path.getsize()
     """
     if not cover_path:
         return "no cover_path"
@@ -372,11 +366,6 @@ def _invalid_reason(cover_path: str | None, min_size: int) -> str:
     if size < min_size:
         return f"file too small ({size} bytes)"
     return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def main():
@@ -393,15 +382,14 @@ def main():
         type=int,
         default=None,
         metavar="NOVEL_ID",
-        help="Fix a single novel by its DB id instead of all invalid ones",
+        help="Fix a single novel by its DB id",
     )
     parser.add_argument(
         "--re-scrape",
         action="store_true",
         help=(
             "Re-scrape the novel landing page to get a fresh cover_url when "
-            "cover_url is NULL in the DB, or when a download fails with the "
-            "existing cover_url. Costs one extra page request per affected novel."
+            "cover_url is NULL, is a placeholder image, or when a download fails."
         ),
     )
     parser.add_argument(
@@ -427,22 +415,17 @@ def main():
     )
     args = parser.parse_args()
 
-    # --- Initialise infrastructure ---
     db_manager = DatabaseManager()
     repo = NovelRepository(db_manager)
     network = NetworkClient()
     browser = BrowserService()
     cover_manager = CoverManager(network, repo)
 
-    # Scraper is only needed when --re-scrape is active
     scraper = None
     if args.re_scrape:
         scraper = ScraperService(network, browser, repo, cover_manager)
-        logger.info(
-            "Re-scrape mode enabled — will scrape landing pages for missing URLs."
-        )
+        logger.info("Re-scrape mode enabled.")
 
-    # --- Find target novels ---
     if args.id is not None:
         row = get_single_novel(db_manager, args.id)
         if not row:
@@ -457,7 +440,6 @@ def main():
     logger.info(f"Inter-novel delay: {args.delay_min}–{args.delay_max}s")
 
     needs_cover, already_valid = audit_novels(all_novels, args.min_size)
-
     logger.info(
         f"\nAudit complete: {len(already_valid)} valid, {len(needs_cover)} need covers."
     )
@@ -468,13 +450,16 @@ def main():
 
     if args.dry_run:
         logger.info("--dry-run: no downloads will be performed.")
-        logger.info(f"\nNovels that would be fixed ({len(needs_cover)}):")
         for novel_id, title, slug, source_url, cover_path, cover_url in needs_cover:
-            has_url = "has cover_url" if cover_url else "NO cover_url"
-            logger.info(f"  [{novel_id}] {title} ({has_url})")
+            if cover_url and _is_placeholder_url(cover_url):
+                url_status = "placeholder URL — needs --re-scrape"
+            elif cover_url:
+                url_status = "has cover_url"
+            else:
+                url_status = "NO cover_url"
+            logger.info(f"  [{novel_id}] {title} ({url_status})")
         sys.exit(0)
 
-    # --- Fix each novel that needs a cover ---
     ok_count = 0
     skipped_count = 0
     fail_count = 0
@@ -506,27 +491,22 @@ def main():
         else:
             fail_count += 1
 
-    # --- Summary ---
     logger.info("=" * 60)
     logger.info(
         f"Cover backfill complete — "
-        f"Fixed: {ok_count}  "
-        f"Skipped (no URL): {skipped_count}  "
-        f"Failed: {fail_count}"
+        f"Fixed: {ok_count}  Skipped: {skipped_count}  Failed: {fail_count}"
     )
     if skipped_count > 0:
         logger.info(
-            f"  {skipped_count} novels had no cover_url in the DB. "
-            f"Re-run with --re-scrape to fetch fresh URLs from their source pages."
+            f"  {skipped_count} novels had no real cover URL. "
+            f"Re-run with --re-scrape to check for newly added covers."
         )
     if fail_count > 0:
         logger.info(
             f"  {fail_count} downloads failed. "
-            f"Re-run this script to retry, or use --re-scrape if the stored "
-            f"cover_url may be stale."
+            f"Re-run to retry, or use --re-scrape if the stored URL may be stale."
         )
 
-    # Stop browser if it was started for re-scraping
     if args.re_scrape:
         try:
             browser.stop()
