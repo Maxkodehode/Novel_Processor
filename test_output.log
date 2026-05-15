@@ -1,0 +1,45 @@
+=== ScribbleHub Scraper Test ===
+PID: 2060
+Importing modules...
+Imports done
+Creating DB schema...
+Initializing services...
+Services initialized
+Scraping: https://www.scribblehub.com/series/1711080/gray-tale-a-star-wars-rebels-story/
+2026-05-13 19:05:25,341 [INFO] Playwright browser and persistent context started.
+2026-05-13 19:05:25,341 [INFO] Using adapter: ScribbleHubAdapter
+2026-05-13 19:05:25,341 [INFO] [SH] Forcing Playwright for ScribbleHub: https://www.scribblehub.com/series/1711080/gray-tale-a-star-wars-rebels-story/
+2026-05-13 19:05:40,421 [INFO] [SH] Page 1 (static HTML): 15 chapters, 9 total pages
+2026-05-13 19:05:40,421 [INFO] [SH] Trying toc_fic_show_all() fast path...
+2026-05-13 19:05:45,426 [INFO] [SH] toc_fic_show_all() did not load more chapters
+2026-05-13 19:05:45,426 [INFO] [SH] Trying AJAX pagination fallback...
+2026-05-13 19:06:02,637 [WARNING] [SH] Timeout waiting for AJAX response for page 2
+2026-05-13 19:06:02,639 [WARNING] [SH] No response body captured for page 2
+2026-05-13 19:06:19,849 [WARNING] [SH] Timeout waiting for AJAX response for page 3
+2026-05-13 19:06:19,850 [WARNING] [SH] No response body captured for page 3
+2026-05-13 19:06:37,060 [WARNING] [SH] Timeout waiting for AJAX response for page 4
+2026-05-13 19:06:37,061 [WARNING] [SH] No response body captured for page 4
+2026-05-13 19:06:37,061 [ERROR] [SH] AJAX pagination: too many failures, stopping
+2026-05-13 19:06:37,061 [INFO] [SH] AJAX methods returned 15 chapters, expected 123. Falling back to chapter-by-chapter...
+2026-05-13 19:06:37,061 [INFO] [SH] Starting chapter-by-chapter collection via Previous links
+2026-05-13 19:06:37,061 [INFO] [SH] Starting from: https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2337350/
+2026-05-13 19:07:19,111 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2195038/: HTTP Error 403: 
+2026-05-13 19:07:19,111 [ERROR] [SH] Error fetching https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2195038/: HTTP Error 403: 
+2026-05-13 19:07:29,111 [WARNING] [SH] Failed to fetch chapter after 3 attempts
+2026-05-13 19:07:29,111 [INFO] [SH] Chapter collection complete: 15 chapters
+2026-05-13 19:07:29,111 [WARNING] [SH] Expected 123 chapters, got 15
+2026-05-13 19:07:29,111 [INFO] [SH] After curl_cffi fallback: 30 chapters
+2026-05-13 19:07:29,111 [INFO] [parse] Final chapter count: 30
+2026-05-13 19:07:29,111 [WARNING] [parse] Expected 123 chapters, got 30. Some pages may have failed.
+2026-05-13 19:07:29,127 [INFO] Playwright browser stopped.
+Scraped: 'Gray Tale, A Star Wars Rebels Story' — 30 chapters in 124.0s
+Expected: 123, Got: 30
+MISMATCH: Missing 93 chapters
+JSON saved to output.json
+  Ch 0: SW Gray Tale Side Stories: Perfect World V (R18+)
+  Ch 1: SW Gray Tale 109: Alderaan
+  Ch 2: SW Gray Tale 110: Alderaan II (3.8k Words)
+  ...
+  Ch 27: 119: Dread
+  Ch 28: Escape From the Planet
+  Ch 29: Devastating Encounters

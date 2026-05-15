@@ -7,8 +7,8 @@ A comprehensive, modular, service-oriented novel scraper, manager, and reader sy
 - **Modular Architecture**: Built with a Service-Based Architecture for easy maintenance and scalability.
 - **Multiple Adapters**: Built-in support for:
   - [Royal Road](https://www.royalroad.com/)
-  - [Scribble Hub](https://www.scribblehub.com/) (Playwright required — chapter lists are JS-rendered. Uses `toc_fic_show_all()` to load all chapters in a single pass, with paginated fallback for large novels.)
-  - [FanFiction.net](https://www.fanfiction.net/)
+  - [Scribble Hub](https://www.scribblehub.com/) (Chapter lists are fetched via direct AJAX POST — no Playwright required. Falls back to static HTML parsing if AJAX fails.)
+  - [FanFiction.net](https://www.fanfiction.net/) (Note: FFN may block automated requests via Cloudflare. Playwright fallback can help but is not guaranteed.)
 - **Mass Discovery Pipeline**: Crawl site-wide ranking lists and automatically hydrate your library with novel metadata and full chapter lists.
 - **Cross-Platform Deduplication**: Two-tier deduplication — exact URL matching and intelligent fuzzy title matching (95% similarity) — to avoid inserting the same novel twice across platforms.
 - **Stubbed Novel Detection**: During sync, if a novel's source page returns zero chapters but the local database has chapters, the novel is recognised as stubbed/sold and local content is preserved. If neither the source nor the database has chapters, the novel is marked `ABANDONED` and excluded from all future processing.
@@ -36,13 +36,13 @@ project_root/
 ├── core/                          # Shared infrastructure
 │   ├── config.py                  # All delays, paths, and tuning constants
 │   ├── database.py                # SQLite Repository and Database Manager
-│   ├── network.py                 # curl_cffi client with impersonation and encoding fix
+│   ├── network.py                 # curl_cffi client (GET + POST) with impersonation
 │   └── run_logger.py              # Structured per-run fetch logging with rotation
 │
 ├── adapters/                      # Site-specific parsing logic
 │   ├── base.py                    # Abstract base adapter
 │   ├── royalroad.py               # Royal Road metadata + chapter parser
-│   ├── scribblehub.py             # ScribbleHub parser (Playwright required)
+│   ├── scribblehub.py             # ScribbleHub parser (direct AJAX for chapters)
 │   ├── fanfiction.py              # FanFiction.net parser
 │   ├── discovery_base.py          # Abstract base discovery adapter
 │   └── discovery_adapters.py      # List page parsers for mass discovery
@@ -245,7 +245,9 @@ All settings are in `core/config.py`:
 
 **Royal Road covers and curl error 61** — Royal Road's CDN can respond with Brotli or Zstd content encoding, which some builds of libcurl cannot decode. The network client now forces `Accept-Encoding: gzip, deflate` on all requests to prevent this. If a cover download still fails via the fast fetch path, it automatically falls back to Playwright, which handles encoding transparently.
 
-**ScribbleHub chapter loading** — ScribbleHub renders chapter lists entirely in JavaScript. The scraper always uses Playwright for ScribbleHub novel pages and calls `toc_fic_show_all()` to load the complete chapter list in one pass. If that function times out or returns fewer chapters than expected (below 90% of the badge count), the scraper falls back to clicking through paginated TOC pages.
+**ScribbleHub chapter loading** — ScribbleHub renders chapter lists via AJAX. The adapter now uses a direct POST to `admin-ajax.php` with `pagenum=-1` to fetch all chapters in a single request, without Playwright. This is faster and more reliable than the previous JS-rendered approach. If the AJAX call fails, the adapter falls back to whatever chapters are present in the static HTML (typically the first 15).
+
+**FanFiction.net blocking** — FanFiction.net uses Cloudflare bot protection that may block requests from `curl_cffi`. The fast fetch path may return an empty or redirect page instead of story content. The Playwright fallback can sometimes bypass this, but FFN may also challenge headless browsers. Consider using the FFN API or manual HTML dumps for problematic stories.
 
 **Persistent browser context** — The Playwright browser is started once per pipeline run and its context (cookies, session state) is reused across all requests in that run. This makes the scraper look like a returning user rather than spawning a fresh fingerprint for every page, which reduces the chance of bot detection.
 

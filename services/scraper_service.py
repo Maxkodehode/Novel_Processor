@@ -1,18 +1,9 @@
 # =============================================================================
 # CHANGES:
-#   - scrape_novel(): ScribbleHub now passes block_resources=False to
-#     get_page_content(). Previously block_resources defaulted to True, which
-#     installed a "**/*" route handler that remained active on the page even
-#     after it was handed to the adapter. Because Playwright fires route handlers
-#     in registration order and route.continue_() consumes the event, the
-#     adapter's own page.route("**/admin-ajax.php") handler never fired —
-#     causing 15-second timeouts on every pagination attempt.
-#     With block_resources=False, no competing route handler is installed and
-#     the adapter's intercept routes work correctly.
-#     Images/media/fonts are already absent from ScribbleHub's chapter list
-#     page DOM, so not blocking them has no meaningful performance impact.
-#   - scrape_novel(): ScribbleHub still passes wait_until="load" so the full
-#     JS bundle executes before the page is returned to the adapter.
+#   - scrape_novel(): ScribbleHub now uses fast network fetch (curl_cffi GET)
+#     instead of forcing Playwright. The adapter fetches all chapters via a
+#     direct POST to admin-ajax.php, so Playwright is not needed for chapter
+#     listing. Playwright fallback is kept for sites that need it.
 #   - All other logic unchanged.
 # =============================================================================
 
@@ -92,39 +83,56 @@ class ScraperService:
             soup = BeautifulSoup(html, "html.parser")
             return adapter.parse(soup, url)
 
-        # --- ScribbleHub: always Playwright with full page load ---
-        # block_resources=False: ScribbleHub's pagination clicks fire AJAX
-        # requests that the adapter intercepts via page.route(). A competing
-        # "**/*" block handler would consume those route events first, making
-        # the adapter's intercept handler unreachable.
-        # wait_until="load": ensures the JS bundle is fully executed.
-        # keep_page_open=True: adapter needs the live page for route interception.
+        # --- ScribbleHub: fast network fetch + AJAX ---
+        # The adapter now uses a direct POST to admin-ajax.php to get all
+        # chapters, so Playwright is NOT needed for chapter listing.
+        # We use the same fast network fetch path as other sites.
         if isinstance(adapter, ScribbleHubAdapter):
-            logger.info(f"[SH] Forcing Playwright for ScribbleHub: {url}")
-            html, pw_page = self.browser.get_page_content(
-                url,
-                keep_page_open=True,
-                wait_until="load",
-                block_resources=False,
-            )
-            adapter._pw_page = pw_page
+            logger.info(f"[SH] Using fast network fetch for ScribbleHub: {url}")
+            try:
+                response = self.network.get(url)
+                if response.status_code == 200:
+                    html = response.text
+                else:
+                    logger.warning(
+                        f"[SH] Fast fetch returned HTTP {response.status_code} "
+                        f"for {url}, trying browser..."
+                    )
+                    html = None
+            except Exception as e:
+                logger.warning(
+                    f"[SH] Fast fetch failed for {url}: {e}. Trying browser..."
+                )
+                html = None
+
+            if not html:
+                try:
+                    html, _ = self.browser.get_page_content(
+                        url, keep_page_open=False
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[scrape_novel] Browser fetch also failed for {url}: {e}"
+                    )
+                    return None
+
+            if not html:
+                logger.error(f"[scrape_novel] Failed to get any content for {url}")
+                return None
+
+            if save_html:
+                with open(save_html, "w", encoding="utf-8") as f:
+                    f.write(html)
+                logger.info(f"[scrape_novel] Saved raw HTML to: {save_html}")
+
             try:
                 soup = BeautifulSoup(html, "html.parser")
-                data = adapter.parse(soup, url)
-                return data
+                return adapter.parse(soup, url, network_client=self.network)
             except Exception as e:
                 logger.error(
                     f"[scrape_novel] Failed to parse ScribbleHub novel {url}: {e}"
                 )
                 return None
-            finally:
-                adapter._pw_page = None
-                # We own this page — close it now that the adapter is done
-                if pw_page:
-                    try:
-                        pw_page.close()
-                    except Exception:
-                        pass
 
         # --- All other sites: try fast network fetch first ---
         html = None

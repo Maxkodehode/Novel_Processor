@@ -10,6 +10,8 @@
 #     libcurl may not support, avoiding curl error 61.
 #   - get(): FFN Referer injection now also guarded against headers being None
 #     (redundant after the fix above, but kept explicit for clarity).
+#   - post(): New method — same browser impersonation and compression handling
+#     as get(), used by ScribbleHubAdapter for direct AJAX chapter fetching.
 # =============================================================================
 
 import logging
@@ -68,4 +70,42 @@ class NetworkClient:
             return response
         except Exception as e:
             logger.error(f"Network error getting {url}: {e}")
+            raise
+
+    def post(self, url: str, data: dict, timeout: int = TIMEOUT, headers: dict | None = None):
+        """
+        Performs a POST request using curl_cffi with browser impersonation.
+
+        Parameters:
+            url (str): The URL to post to.
+            data (dict): Form data to send.
+            timeout (int): Request timeout in seconds.
+            headers (dict | None): Optional extra headers. Safe to pass None.
+
+        Returns:
+            Response: curl_cffi response object.
+
+        Raises:
+            Exception: Re-raises any network or HTTP error after logging.
+
+        Called by: ScribbleHubAdapter._fetch_all_chapters_via_ajax()
+        Depends on: curl_cffi, TIMEOUT
+        """
+        if headers is None:
+            headers = {}
+
+        headers["Accept-Encoding"] = "gzip, deflate"
+
+        try:
+            response = cur_requests.post(
+                url,
+                data=data,
+                impersonate=self.impersonate,
+                timeout=timeout,
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            logger.error(f"Network error posting to {url}: {e}")
             raise

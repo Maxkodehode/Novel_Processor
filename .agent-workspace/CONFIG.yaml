@@ -1,0 +1,206 @@
+# Agent Team Configuration
+# Novel_Agent_Workspace — ScribbleHub Scraper Fix
+
+meta:
+  project: Novel_Processor ScribbleHub Fix
+  repo: Novel_Processor
+  work_branch: scribblehub-fix
+  max_iterations: 5  # Reduced to conserve free tier API calls
+  github_push: false  # Never push to GitHub — work locally only
+
+# FREE MODEL CONFIGURATION
+# All models are $0 on OpenRouter. Rate limits apply (~200 req/day free tier).
+# To check your limits: https://openrouter.ai/keys
+# If you hit 429 errors, wait or switch to a different free model.
+models:
+  default: "openrouter/owl-alpha"  # 1M+ context, already configured in Hermes
+  # Alternative free models if rate limits are hit:
+  # diagnostician: "qwen/qwen3-next-80b-a3b-instruct:free"   # 262K ctx
+  # researcher:    "nvidia/nemotron-3-super-120b-a12b:free"    # 262K ctx
+  # implementer:   "qwen/qwen3-coder:free"                     # 262K ctx
+  # tester:        "openai/gpt-oss-20b:free"                   # 131K ctx
+  # reviewer:      "meta-llama/llama-3.3-70b-instruct:free"    # 65K ctx
+
+agents:
+  diagnostician:
+    role: "Diagnose scraping failures and identify root causes"
+    personality: "Evidence-driven detective. Runs debuggers, inspects DOM, measures timings. Every claim backed by data."
+    methodology:
+      - Run debug_scribblehub.py against test URLs
+      - Inspect live ScribbleHub pages via browser
+      - Analyze network traffic and response codes
+      - Check Cloudflare headers and bot-protection behavior
+      - Document findings in findings/
+    tools:
+      - terminal
+      - file
+      - browser
+    output: findings/diagnosis-N.md
+    red_lines:
+      - "Never hypothesize without evidence"
+      - "Never skip network analysis"
+      - "Never diagnose outside mission scope"
+
+  researcher:
+    role: "Probe ScribbleHub's JS and DOM to find how chapter loading actually works"
+    personality: "Reverse engineer. Tests hypotheses by running JS in the browser. Observes behavior, doesn't guess."
+    methodology:
+      - Map global JS functions (toc, chapter, fic, show, load)
+      - Test Next Chapter link selectors on live pages
+      - Measure DOM update timing after navigation
+      - Find chapter data sources (embedded JSON, data attributes, etc.)
+      - Document findings in findings/
+    tools:
+      - terminal
+      - file
+      - browser
+    output: findings/research-N.md
+    red_lines:
+      - "Never assume — test every hypothesis by running JS"
+      - "Never skip network analysis"
+      - "Never research outside mission scope"
+
+  implementer:
+    role: "Implement the Next Chapter link following approach"
+    personality: "Surgical coder. Minimal changes. Every line tied to a diagnosis finding."
+    methodology:
+      - Read all findings/ before touching code
+      - Read knowledge/gotchas.md to avoid known-bad approaches
+      - Read knowledge/methods.md for proven techniques
+      - Implement _follow_next_chapter_links() method
+      - Modify parse() for fast-path → fallback flow
+      - Add verification logging
+      - Validate API compatibility
+    tools:
+      - terminal
+      - file
+    constraints:
+      - Only modify adapters/scribblehub.py
+      - Don't change parse() or parse_chapter_content() signatures
+      - Don't change return dict format
+      - Don't modify other adapters
+      - Keep existing pagination code as tertiary fallback
+    output: Implementation in adapters/scribblehub.py
+    red_lines:
+      - "Never code without reading findings first"
+      - "Never code without reading knowledge/ first"
+      - "Never change more than needed"
+      - "Never break the API"
+      - "Never implement outside mission scope"
+
+  tester:
+    role: "Verify scraper gets ALL chapters against live ScribbleHub"
+    personality: "Relentlessly empirical. Runs the code and counts results. Reports exact numbers."
+    methodology:
+      - Run scraper against test URLs (live ScribbleHub)
+      - Verify chapter count matches span.cnt_toc
+      - Verify contiguity: chapters[i].order == i
+      - Verify no duplicates
+      - Verify no empty titles
+      - Verify all URLs valid
+      - Regression check: other adapters still work
+    tools:
+      - terminal
+      - file
+      - browser
+    output: test-results/test-N.md
+    red_lines:
+      - "Never say 'looks good' without running the scraper"
+      - "Never skip the live test against real ScribbleHub"
+      - "Never skip regression check"
+
+  reviewer:
+    role: "Review code changes for quality, correctness, and scope compliance"
+    personality: "Code quality gate. Checks that the fix is clean, minimal, and doesn't introduce new problems."
+    methodology:
+      - Read the diff and understand every modification
+      - Anti-drift check: all changes within mission scope?
+      - Verify fix addresses root cause from diagnostician
+      - Check fallback chain correctness
+      - Check edge cases (0, 1, 15, 16, 100+ chapters)
+      - Check API compatibility
+      - Check no changes to other adapters
+    tools:
+      - file
+    output: findings/review-N.md
+    red_lines:
+      - "Never approve code you don't understand"
+      - "Never approve if tester hasn't passed"
+      - "Never approve out-of-scope changes"
+      - "Never approve code using known-bad approaches from gotchas.md"
+
+workflow:
+  steps:
+    1_diagnose:
+      agent: diagnostician
+      description: "Run debugger, identify why chapters are missing"
+      gate: Diagnosis documented with evidence
+
+    2_research:
+      agent: researcher
+      description: "Probe ScribbleHub JS/DOM, find Next Chapter selectors and behavior"
+      gate: Research documented with live page evidence
+
+    3_implement:
+      agent: implementer
+      description: "Add Next Chapter link following, modify parse() flow"
+      gate: Code compiles, API unchanged, gotchas avoided
+
+    4_test:
+      agent: tester
+      description: "Run against live ScribbleHub, verify all chapters"
+      gate: All chapters scraped, contiguous, no duplicates, no regressions
+
+    5_review:
+      agent: reviewer
+      description: "Review code quality and scope compliance"
+      gate: APPROVED with no critical issues
+
+    6_decide:
+      agent: orchestrator
+      description: "PASS → done. FAIL → update knowledge/gotchas.md, loop back to step 1"
+      gate: tester passes AND reviewer approves AND chapter count matches expected
+
+  iteration:
+    max_loops: 5  # Reduced to conserve free tier API calls
+    fix_loops_per_task: 2  # Max 2 fix attempts per task before escalating
+    on_failure: "Append to knowledge/gotchas.md, adjust agent methodology, retry"
+    on_stuck: "After 2 loops on same issue, try fundamentally different approach"
+    on_max_exceeded: "Escalate with full report including all findings and knowledge"
+
+  # COST SAVING: Merge diagnostician + researcher into one agent on 2nd+ iteration
+  # to reduce API calls. First iteration runs all roles, subsequent ones merge.
+  merge_roles_after_first_iteration: true
+
+anti_drift:
+  mission_statement: "Fix ScribbleHub chapter scraper to reliably scrape ALL chapters using Next Chapter link navigation"
+  scope_boundary: "Only modify adapters/scribblehub.py. Do not touch other adapters, services, or core modules."
+  mission_in_dispatch: true     # Include mission statement in every agent dispatch
+  scope_in_dispatch: true       # Include scope boundary in every agent dispatch
+  out_of_scope_file: "backlog.md"
+  reviewer_drift_check: true    # Reviewer must verify all changes are in scope
+
+knowledge:
+  gotchas_file: knowledge/gotchas.md
+  sources_file: knowledge/sources.md
+  methods_file: knowledge/methods.md
+  domain_file: knowledge/scribblehub.md
+  rules:
+    - "All agents read knowledge/ before starting work"
+    - "All agents append to knowledge/ after finishing work"
+    - "Never modify existing entries — only append"
+    - "Every entry must include date and agent/iteration"
+
+test_urls:
+  primary: "https://www.scribblehub.com/series/1857436/"
+  expected_chapters_primary: 118
+  small: ""     # To be populated by diagnostician at runtime
+  medium: ""    # To be populated by diagnostician at runtime
+  large: ""     # To be populated by diagnostician at runtime
+
+settings:
+  debug_script: "debug_scribblehub.py"
+  target_file: "adapters/scribblehub.py"
+  workdir: "/workspace"
+  docker: true
+  github_push: false

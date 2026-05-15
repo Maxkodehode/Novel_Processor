@@ -259,7 +259,7 @@ def main():
         sys.exit(0)
 
     logger.info(f"Found {len(targets)} novel(s) with no chapter rows:")
-    for novel_id, title, source_url in targets:
+    for novel_id, title, source_url, _status in targets:
         logger.info(f"  [{novel_id}] {title}  ({source_url})")
 
     if args.dry_run:

@@ -2,22 +2,15 @@
 # CHANGES:
 #   - get_page_content(): When keep_page_open=True, the page-level block route
 #     handler is now unrouted before returning the page to the caller.
-#     Previously the "**/*" block handler remained active on the page permanently.
-#     This caused any subsequent page.route() calls installed by the adapter
-#     (e.g. on "**/admin-ajax.php") to silently fail: Playwright fires route
-#     handlers in registration order and calls to route.continue_() from the
-#     first handler consume the route event, so later handlers never execute.
-#     For ScribbleHub this meant the AJAX intercept route never fired, causing
-#     15-second timeouts on every pagination attempt.
-#     Unrouting on keep_page_open=True is safe because the caller takes
-#     ownership of the page and is responsible for managing its own routes.
+#     Previously the "**/*" block handler remained active on the page permanently,
+#     which could interfere with subsequent page.route() calls installed by
+#     callers. Unrouting on keep_page_open=True is safe because the caller takes
+#     ownership of the page and manages its own routes.
 #   - get_page_content(): Added `wait_until` parameter (default "domcontentloaded")
 #     so callers can request "load" or "networkidle" without changing behaviour
-#     for all other sites. ScribbleHub passes "load" so its JS bundle fully
-#     executes before the page is returned to the adapter.
+#     for other sites.
 #   - get_page_content(): Under DEBUG mode, logs which URL stealth was applied to
-#     and logs every blocked resource type so it is possible to confirm blocking
-#     is working as expected.
+#     and logs every blocked resource type.
 #   - All other behaviour unchanged.
 # =============================================================================
 

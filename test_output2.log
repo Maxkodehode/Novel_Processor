@@ -1,0 +1,49 @@
+=== ScribbleHub Scraper Test (Round 2) ===
+PID: 2996
+Importing modules...
+Imports done
+Creating DB schema...
+Initializing services...
+Services initialized
+Scraping: https://www.scribblehub.com/series/1711080/gray-tale-a-star-wars-rebels-story/
+2026-05-13 19:19:18,750 [INFO] Playwright browser and persistent context started.
+2026-05-13 19:19:18,750 [INFO] Using adapter: ScribbleHubAdapter
+2026-05-13 19:19:18,750 [INFO] [SH] Forcing Playwright for ScribbleHub: https://www.scribblehub.com/series/1711080/gray-tale-a-star-wars-rebels-story/
+2026-05-13 19:19:20,371 [INFO] [SH] Page 1 (static HTML): 15 chapters, 9 total pages
+2026-05-13 19:19:20,371 [INFO] [SH] Trying toc_fic_show_all() fast path...
+2026-05-13 19:19:25,376 [INFO] [SH] toc_fic_show_all() did not load more chapters
+2026-05-13 19:19:25,376 [INFO] [SH] Trying AJAX pagination fallback...
+2026-05-13 19:19:32,383 [WARNING] [SH] Timeout waiting for AJAX response for page 2
+2026-05-13 19:19:32,385 [WARNING] [SH] No response body captured for page 2
+2026-05-13 19:19:39,390 [WARNING] [SH] Timeout waiting for AJAX response for page 3
+2026-05-13 19:19:39,392 [WARNING] [SH] No response body captured for page 3
+2026-05-13 19:19:39,392 [ERROR] [SH] AJAX pagination: too many failures, stopping
+2026-05-13 19:19:39,392 [INFO] [SH] AJAX methods returned 15 chapters, expected 123. Falling back to chapter-by-chapter...
+2026-05-13 19:19:39,392 [INFO] [SH] Starting chapter-by-chapter collection via Previous links
+2026-05-13 19:19:39,392 [INFO] [SH] Starting from: https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2337350/
+2026-05-13 19:20:21,976 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2195038/: HTTP Error 403: 
+2026-05-13 19:20:21,976 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:20:37,327 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2182989/: HTTP Error 403: 
+2026-05-13 19:20:37,327 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:20:52,879 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2172874/: HTTP Error 403: 
+2026-05-13 19:20:52,879 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:21:14,018 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2154772/: HTTP Error 403: 
+2026-05-13 19:21:14,018 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:21:32,331 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2136003/: HTTP Error 403: 
+2026-05-13 19:21:32,331 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:21:53,655 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2122818/: HTTP Error 403: 
+2026-05-13 19:21:53,656 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:22:14,741 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2101787/: HTTP Error 403: 
+2026-05-13 19:22:14,741 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:22:35,993 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2061775/: HTTP Error 403: 
+2026-05-13 19:22:35,993 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:22:54,399 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2043969/: HTTP Error 403: 
+2026-05-13 19:22:54,399 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:23:15,588 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/2023614/: HTTP Error 403: 
+2026-05-13 19:23:15,588 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:23:36,677 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/1994580/: HTTP Error 403: 
+2026-05-13 19:23:36,677 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:23:57,851 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/1969241/: HTTP Error 403: 
+2026-05-13 19:23:57,851 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
+2026-05-13 19:24:15,987 [ERROR] Network error getting https://www.scribblehub.com/read/1711080-gray-tale-a-star-wars-rebels-story/chapter/1961494/: HTTP Error 403: 
+2026-05-13 19:24:15,987 [WARNING] [SH] HTTP 403 for chapter, waiting 10s (attempt 1/3)
